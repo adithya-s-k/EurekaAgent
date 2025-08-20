@@ -1,0 +1,16 @@
+nbformat
+nbconvert
+huggingface_hub
+modal
+transformers
+traitlets
+openai
+gradio
+
+numpy
+scipy
+matplotlib
+pandas
+seaborn
+arize-phoenix-otel
+openinference-instrumentation-openai
