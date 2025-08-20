@@ -20,6 +20,36 @@ from utils import (
     run_interactive_notebook,
 )
 
+def parse_environment_variables(env_vars_text):
+    """
+    Parse environment variables from text input
+    
+    Args:
+        env_vars_text: String containing environment variables in KEY=value format, one per line
+        
+    Returns:
+        dict: Dictionary of parsed environment variables
+    """
+    env_dict = {}
+    if not env_vars_text or not env_vars_text.strip():
+        return env_dict
+        
+    for line in env_vars_text.strip().split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#'):  # Skip empty lines and comments
+            continue
+            
+        if '=' in line:
+            key, value = line.split('=', 1)  # Split only on first =
+            key = key.strip()
+            value = value.strip()
+            if key:  # Only add if key is not empty
+                env_dict[key] = value
+        else:
+            logger.warning(f"Skipping invalid environment variable format: {line}")
+    
+    return env_dict
+
 def create_notification_html(message, notification_type="info"):
     """
     Create HTML for notification messages
@@ -246,7 +276,7 @@ except FileNotFoundError:
 
 
 def execute_jupyter_agent(
-    user_input, files, message_history, gpu_type, cpu_cores, memory_gb, timeout_sec, request: gr.Request
+    user_input, files, message_history, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars_text, request: gr.Request
 ):
     session_id = request.session_hash
     logger.info(f"Starting execution for session {session_id}")
@@ -287,6 +317,13 @@ def execute_jupyter_agent(
                 "MODAL_TOKEN_SECRET": MODAL_TOKEN_SECRET
             })
             logger.debug(f"Modal credentials configured for session {session_id}")
+        
+        # Parse and add user-provided environment variables
+        user_env_vars = parse_environment_variables(env_vars_text)
+        if user_env_vars:
+            environment_vars.update(user_env_vars)
+            logger.info(f"Added {len(user_env_vars)} custom environment variables for session {session_id}")
+            logger.debug(f"Custom environment variables: {list(user_env_vars.keys())}")
         
         try:
             SANDBOXES[request.session_hash] = create_modal_sandbox(
@@ -470,7 +507,7 @@ def stop_execution(request: gr.Request):
         logger.warning(f"No active execution found for session {session_id}")
         return "❌ No active execution to stop"
 
-def continue_execution(user_input, files, message_history, gpu_type, cpu_cores, memory_gb, timeout_sec, request: gr.Request):
+def continue_execution(user_input, files, message_history, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars_text, request: gr.Request):
     """Continue execution after it was stopped"""
     session_id = request.session_hash
     logger.info(f"Continuing execution for session {session_id}")
@@ -486,7 +523,7 @@ def continue_execution(user_input, files, message_history, gpu_type, cpu_cores, 
         logger.info(f"Reset execution state for session {session_id}")
     
     # Continue with normal execution - yield from the generator
-    yield from execute_jupyter_agent(user_input, files, message_history, gpu_type, cpu_cores, memory_gb, timeout_sec, request)
+    yield from execute_jupyter_agent(user_input, files, message_history, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars_text, request)
 
 def get_execution_status(request: gr.Request):
     """Get the current execution status for UI updates"""
@@ -595,6 +632,24 @@ with gr.Blocks() as demo:
         ⚠️ **Note**: GPU instances cost more. Choose based on your workload.
         """)
     
+    with gr.Accordion("Environment Variables 🔧", open=False):
+        env_vars = gr.Textbox(
+            label="Environment Variables",
+            placeholder="Enter environment variables (one per line):\nAPI_KEY=your_key_here\nDATA_PATH=/path/to/data\nDEBUG=true",
+            lines=5,
+            info="Add custom environment variables for the sandbox. Format: KEY=value (one per line)"
+        )
+        
+        env_info = gr.Markdown("""
+        **Environment Variables Info:**
+        - Variables will be available in the sandbox environment
+        - Use KEY=value format, one per line
+        - Common examples: API keys, data paths, configuration flags
+        - Variables are session-specific and not persisted between sessions
+        
+        ⚠️ **Security**: Avoid sensitive credentials in shared environments
+        """)
+    
     with gr.Accordion("Upload files ⬆ | Download notebook⬇", open=False):
         files = gr.File(label="Upload files to use", file_count="multiple")
         file = gr.File(TMP_DIR+"jupyter-agent.ipynb", label="Download Jupyter Notebook")
@@ -602,7 +657,7 @@ with gr.Blocks() as demo:
 
     generate_btn.click(
         fn=execute_jupyter_agent,
-        inputs=[user_input, files, msg_state, gpu_type, cpu_cores, memory_gb, timeout_sec],
+        inputs=[user_input, files, msg_state, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars],
         outputs=[html_output, msg_state, file],
         show_progress="hidden",
     )
@@ -615,7 +670,7 @@ with gr.Blocks() as demo:
 
     continue_btn.click(
         fn=continue_execution,
-        inputs=[user_input, files, msg_state, gpu_type, cpu_cores, memory_gb, timeout_sec],
+        inputs=[user_input, files, msg_state, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars],
         outputs=[html_output, msg_state, file],
         show_progress="hidden",
     )
