@@ -1,9 +1,16 @@
 from jupyter_handler import JupyterNotebook
 import json
 import logging
+import os
+import datetime
+from tavily import TavilyClient
 
 # Configure logging for utils module
 logger = logging.getLogger(__name__)
+
+# Initialize Tavily client
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
 
 TOOLS = [
@@ -21,6 +28,23 @@ TOOLS = [
                     }
                 },
                 "required": ["code"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tavily_search",
+            "description": "Search the web for current information, documentation, tutorials, and solutions to coding problems. Use this to get context before starting tasks or when encountering errors.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (max 400 characters). Be specific and include relevant keywords."
+                    }
+                },
+                "required": ["query"]
             }
         }
     },
@@ -110,9 +134,101 @@ def clean_messages_for_api(messages):
     return cleaned_messages
 
 
-def run_interactive_notebook(client, model, messages, sbx, stop_event=None):
+def tavily_search(query):
+    """
+    Perform web search using Tavily API with automatic year addition and formatting.
+    
+    Args:
+        query (str): Search query (max 400 characters)
+        
+    Returns:
+        str: Formatted search results for LLM consumption
+    """
+    if not tavily_client:
+        logger.error("Tavily client not initialized - API key missing")
+        return "❌ Search unavailable: Tavily API key not configured"
+    
+    # Validate query length
+    if len(query) > 400:
+        logger.warning(f"Query too long ({len(query)} chars), truncating to 400")
+        query = query[:400]
+    
+    # Add current year to query for more recent results
+    current_year = datetime.datetime.now().year
+    if str(current_year) not in query:
+        # Only add year if query has room for it
+        year_addition = f" {current_year}"
+        if len(query + year_addition) <= 400:
+            query += year_addition
+            logger.debug(f"Added current year to query: {current_year}")
+    
+    logger.info(f"Performing Tavily search: '{query}' ({len(query)} chars)")
+    
+    try:
+        # Perform search with optimized parameters
+        response = tavily_client.search(
+            query=query,
+            search_depth="basic",  # Use basic for faster results
+            max_results=5,         # Limit results to avoid overwhelming context
+            include_answer=True,   # Include AI-generated answer
+            include_raw_content=False,  # Don't include raw content to save tokens
+            include_images=False   # Don't include images
+        )
+        
+        logger.info(f"Search completed: {len(response.get('results', []))} results found")
+        
+        # Format results for LLM consumption
+        formatted_results = format_search_results_for_llm(response)
+        
+        logger.debug(f"Formatted search results: {len(formatted_results)} characters")
+        return formatted_results
+        
+    except Exception as e:
+        logger.error(f"Tavily search failed: {str(e)}")
+        return f"❌ Search failed: {str(e)}"
+
+
+def format_search_results_for_llm(response):
+    """Format Tavily search results for LLM consumption"""
+    
+    query = response.get('query', 'Unknown query')
+    results = response.get('results', [])
+    answer = response.get('answer', '')
+    
+    formatted = f"🔍 **Web Search Results for:** {query}\n\n"
+    
+    if answer:
+        formatted += f"**Quick Answer:** {answer}\n\n"
+    
+    if results:
+        formatted += f"**Found {len(results)} relevant sources:**\n\n"
+        
+        for i, result in enumerate(results, 1):
+            title = result.get('title', 'Untitled')
+            url = result.get('url', '')
+            content = result.get('content', '')
+            score = result.get('score', 0)
+            
+            # Truncate content to reasonable length
+            if len(content) > 300:
+                content = content[:300] + "..."
+            
+            formatted += f"**{i}. {title}** (Relevance: {score:.2f})\n"
+            formatted += f"   🔗 {url}\n"
+            formatted += f"   📄 {content}\n\n"
+    else:
+        formatted += "No results found.\n"
+    
+    return formatted
+
+
+def run_interactive_notebook(client, model, messages, sbx, stop_event=None, tools=None):
     logger.info(f"Starting interactive notebook with {len(messages)} initial messages")
     notebook = JupyterNotebook(messages)
+    
+    # Use provided tools or default to all tools
+    if tools is None:
+        tools = TOOLS
     
     try:
         sbx_info = sbx.get_info()
@@ -142,7 +258,7 @@ def run_interactive_notebook(client, model, messages, sbx, stop_event=None):
             response = client.chat.completions.create(
                 messages=clean_messages_for_api(messages),
                 model=model,
-                tools=TOOLS,
+                tools=tools,
                 tool_choice="auto",
             )
             logger.debug("API call successful")
@@ -357,6 +473,48 @@ An error occurred while executing the code in the sandbox:
                         "raw_execution": raw_execution
                     }
                 )
+            elif tool_call.function.name == "tavily_search":
+                logger.debug(f"Processing search tool call: {tool_call.id}")
+                tool_args = json.loads(tool_call.function.arguments)
+                query = tool_args["query"]
+                logger.debug(f"Search query: '{query}' ({len(query)} chars)")
+                
+                # Add search status to notebook
+                notebook.add_markdown("🔍 **Searching the web...**", "assistant")
+                yield notebook.render(mode="generating"), notebook.data, messages
+                
+                try:
+                    # Perform search
+                    search_results = tavily_search(query)
+                    logger.info("Search completed successfully")
+                    
+                    # Add search results to notebook
+                    notebook.add_markdown(search_results, "assistant")
+                    
+                    # Add tool response to messages
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": search_results
+                        }
+                    )
+                    
+                except Exception as e:
+                    error_message = f"❌ Search failed: {str(e)}"
+                    logger.error(f"Search tool call failed: {str(e)}")
+                    
+                    # Add error to notebook
+                    notebook.add_markdown(error_message, "assistant")
+                    
+                    # Add error response to messages
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": error_message
+                        }
+                    )
             else:
                 logger.warning(f"Unknown tool call function: {tool_call.function.name}")
 

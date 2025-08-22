@@ -63,6 +63,11 @@ def get_required_api_keys():
             "value": os.environ.get("MODEL_NAME"),
             "required": True,
             "description": "Model name to use"
+        },
+        "TAVILY_API_KEY": {
+            "value": os.environ.get("TAVILY_API_KEY"),
+            "required": False,
+            "description": "Tavily API Key for web search functionality"
         }
     }
     return required_keys
@@ -99,6 +104,8 @@ def validate_api_key_format(key_name, key_value):
             return False, "API key format may be invalid (expected prefixes: sk-, gsk_, csk-)"
     elif key_name == "PROVIDER_API_ENDPOINT" and not (key_value.startswith("http://") or key_value.startswith("https://")):
         return False, "API endpoint should start with http:// or https://"
+    elif key_name == "TAVILY_API_KEY" and not key_value.startswith("tvly-"):
+        return False, "Tavily API key should start with 'tvly-'"
     
     return True, "Valid format"
 
@@ -466,7 +473,7 @@ except FileNotFoundError:
 def execute_jupyter_agent(
     user_input, files, message_history, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars_text, 
     modal_token_id, modal_token_secret, hf_token, provider_api_key, provider_api_endpoint, user_model_name,
-    request: gr.Request
+    tavily_api_key, enable_web_search, request: gr.Request
 ):
     session_id = request.session_hash
     logger.info(f"Starting execution for session {session_id}")
@@ -487,6 +494,8 @@ def execute_jupyter_agent(
         user_api_keys["PROVIDER_API_ENDPOINT"] = provider_api_endpoint
     if user_model_name:
         user_api_keys["MODEL_NAME"] = user_model_name
+    if tavily_api_key:
+        user_api_keys["TAVILY_API_KEY"] = tavily_api_key
     
     # Check if we have a client or need to initialize one with user keys
     global client, model_name
@@ -737,10 +746,25 @@ You can either:
 
     logger.debug(f"Message history for session {session_id}: {len(message_history)} messages")
 
+    # Determine which tools to use based on web search toggle
+    from utils import TOOLS
+    if enable_web_search:
+        # Check if Tavily API key is available
+        tavily_key = os.environ.get("TAVILY_API_KEY") or tavily_api_key
+        if tavily_key:
+            selected_tools = TOOLS  # Use all tools (code + search)
+            logger.info(f"Web search enabled for session {session_id} - using all tools")
+        else:
+            selected_tools = TOOLS[:1]  # Use only code execution tool
+            logger.warning(f"Web search enabled but no Tavily API key found for session {session_id} - using code tool only")
+    else:
+        selected_tools = TOOLS[:1]  # Use only code execution tool  
+        logger.info(f"Web search disabled for session {session_id} - using code tool only")
+
     logger.info(f"Starting interactive notebook execution for session {session_id}")
     try:
         for notebook_html, notebook_data, messages in run_interactive_notebook(
-            client, model_name, message_history, sbx, STOP_EVENTS[session_id]
+            client, model_name, message_history, sbx, STOP_EVENTS[session_id], selected_tools
         ):
             message_history = messages
             logger.debug(f"Interactive notebook yield for session {session_id}")
@@ -809,9 +833,35 @@ def stop_execution(request: gr.Request):
         logger.warning(f"No active execution found for session {session_id}")
         return "❌ No active execution to stop"
 
+def shutdown_sandbox(request: gr.Request):
+    """Shutdown the sandbox for this session"""
+    session_id = request.session_hash
+    logger.info(f"Shutting down sandbox for session {session_id}")
+    
+    if session_id in SANDBOXES:
+        try:
+            logger.info(f"Killing Modal sandbox for session {session_id}")
+            SANDBOXES[session_id].kill()
+            SANDBOXES.pop(session_id)
+            logger.info(f"Successfully shutdown sandbox for session {session_id}")
+            
+            # Clean up stop events and execution states
+            if session_id in STOP_EVENTS:
+                STOP_EVENTS.pop(session_id)
+            if session_id in EXECUTION_STATES:
+                EXECUTION_STATES.pop(session_id)
+                
+            return "🔴 Sandbox shutdown successfully", gr.Button(visible=False)
+        except Exception as e:
+            logger.error(f"Error shutting down sandbox for session {session_id}: {str(e)}")
+            return f"❌ Error shutting down sandbox: {str(e)}", gr.Button(visible=True)
+    else:
+        logger.info(f"No active sandbox found for session {session_id}")
+        return "⚪ No active sandbox to shutdown", gr.Button(visible=False)
+
 def continue_execution(user_input, files, message_history, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars_text, 
                       modal_token_id, modal_token_secret, hf_token, provider_api_key, provider_api_endpoint, user_model_name,
-                      request: gr.Request):
+                      tavily_api_key, enable_web_search, request: gr.Request):
     """Continue execution after it was stopped"""
     session_id = request.session_hash
     logger.info(f"Continuing execution for session {session_id}")
@@ -846,7 +896,8 @@ def continue_execution(user_input, files, message_history, gpu_type, cpu_cores, 
     
     # Continue with normal execution - yield from the generator
     yield from execute_jupyter_agent(user_input, files, message_history, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars_text,
-                                    modal_token_id, modal_token_secret, hf_token, provider_api_key, provider_api_endpoint, user_model_name, request)
+                                    modal_token_id, modal_token_secret, hf_token, provider_api_key, provider_api_endpoint, user_model_name,
+                                    tavily_api_key, enable_web_search, request)
 
 def get_execution_status(request: gr.Request):
     """Get the current execution status for UI updates"""
@@ -865,6 +916,24 @@ def get_execution_status(request: gr.Request):
         return "⏸️ Paused"
     else:
         return "⚪ Ready"
+
+def is_sandbox_active(request: gr.Request):
+    """Check if sandbox is active for the current session"""
+    session_id = request.session_hash
+    return session_id in SANDBOXES
+
+def get_sandbox_status_and_visibility(request: gr.Request):
+    """Get sandbox status message and button visibility"""
+    session_id = request.session_hash
+    if session_id in SANDBOXES:
+        return "🟢 Sandbox active", gr.Button(visible=True)
+    else:
+        return "⚪ No sandbox active", gr.Button(visible=False)
+
+def update_sandbox_button_visibility(request: gr.Request):
+    """Update only the button visibility based on sandbox status"""
+    session_id = request.session_hash
+    return gr.Button(visible=session_id in SANDBOXES)
 
 def reconstruct_message_history_from_notebook(notebook_data):
     """Reconstruct message history from notebook cells"""
@@ -937,11 +1006,11 @@ def load_previous_notebook(notebook_choice, request: gr.Request):
     """Load a previous notebook with complete session configuration (dev only)"""
     if not is_dev_environment():
         return (init_notebook.render(), [], "Load previous notebooks is only available in development mode",
-                None, None, None, None, None, "", "", "", "", "", "")
+                None, None, None, None, None, "", "", "", "", "", "", "", False)
     
     if not notebook_choice or notebook_choice == "None":
         return (init_notebook.render(), [], "Please select a notebook to load",
-                None, None, None, None, None, "", "", "", "", "", "")
+                None, None, None, None, None, "", "", "", "", "", "", "", False)
     
     try:
         # Parse the notebook choice to get the session ID
@@ -950,7 +1019,7 @@ def load_previous_notebook(notebook_choice, request: gr.Request):
         
         if not notebook_path.exists():
             return (init_notebook.render(), [], f"Notebook file not found: {notebook_path}",
-                    None, None, None, None, None, "", "", "", "", "", "")
+                    None, None, None, None, None, "", "", "", "", "", "", "", False)
         
         # Load the notebook
         with open(notebook_path, 'r') as f:
@@ -1019,13 +1088,14 @@ def load_previous_notebook(notebook_choice, request: gr.Request):
         
         return (loaded_notebook.render(), message_history, success_message,
                 gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars,
-                modal_token_id, modal_token_secret, hf_token, provider_api_key, provider_api_endpoint, model_name)
+                modal_token_id, modal_token_secret, hf_token, provider_api_key, provider_api_endpoint, model_name,
+                "", False)  # Default empty tavily_api_key and False for enable_web_search
         
     except Exception as e:
         logger.error(f"Failed to load notebook {notebook_choice}: {str(e)}")
         error_message = f"❌ Failed to load notebook: {str(e)}"
         return (init_notebook.render(), [], error_message,
-                None, None, None, None, None, "", "", "", "", "", "")
+                None, None, None, None, None, "", "", "", "", "", "", "", False)
 
 def get_notebook_options():
     """Get options for notebook dropdown (dev only)"""
@@ -1139,6 +1209,52 @@ with gr.Blocks() as demo:
         label="Agent task"
     )
     
+    with gr.Accordion("Upload files ⬆ | Download notebook⬇", open=False):
+        files = gr.File(label="Upload files to use", file_count="multiple")
+        file = gr.File(TMP_DIR+"jupyter-agent.ipynb", label="Download Jupyter Notebook")
+
+
+    with gr.Row():
+        # Web Search Configuration
+        with gr.Accordion("🔍 Web Search Settings", open=False):
+            with gr.Row():
+                enable_web_search = gr.Checkbox(
+                    label="Enable Web Search",
+                    value=bool(os.environ.get("TAVILY_API_KEY")),  # Default to True if API key is available
+                    info="Allow the agent to search the web for current information and documentation"
+                )
+                
+                # Show web search status with better formatting
+                tavily_status = "✅ Available" if os.environ.get("TAVILY_API_KEY") else "❌ API Key Required"
+                gr.Markdown(f"**Status:** {tavily_status}")
+            
+            gr.Markdown("""
+            **Web Search Features:**
+            - 🌐 Search for current tutorials, documentation, and best practices
+            - 🐛 Find solutions to error messages and debugging help
+            - 📚 Access up-to-date library documentation and examples
+            - 💡 Get recent examples and code snippets from the web
+            
+            ⚠️ **Note**: Web search requires a Tavily API key. Get one free at [tavily.com](https://tavily.com)
+            """)
+        # Previous notebooks section (dev only)
+        if is_dev_environment():
+            with gr.Accordion("📂 Load Previous Notebook (Dev Only)", open=False):
+                notebook_dropdown = gr.Dropdown(
+                    choices=get_notebook_options(),
+                    value="None",
+                    label="Select Previous Notebook",
+                    info="Load a previously created notebook session"
+                )
+                with gr.Row():
+                    load_notebook_btn = gr.Button("📖 Load Selected", variant="secondary")
+                    refresh_notebooks_btn = gr.Button("🔄 Refresh List", variant="secondary")
+                
+                load_status = gr.Textbox(
+                    label="Load Status",
+                    interactive=False,
+                    visible=False
+                )   
     # Check for missing API keys and show input fields conditionally
     missing_keys = get_missing_api_keys()
     
@@ -1209,6 +1325,16 @@ with gr.Blocks() as demo:
                 )
             else:
                 api_key_components["model_name"] = gr.Textbox(visible=False)
+                
+            if "TAVILY_API_KEY" in missing_keys:
+                api_key_components["tavily_api_key"] = gr.Textbox(
+                    label="Tavily API Key (Optional)",
+                    placeholder="tvly-...",
+                    info="Tavily API Key for web search functionality",
+                    type="password"
+                )
+            else:
+                api_key_components["tavily_api_key"] = gr.Textbox(visible=False)
     else:
         # Create hidden components when no keys are missing
         api_key_components = {
@@ -1217,43 +1343,33 @@ with gr.Blocks() as demo:
             "hf_token": gr.Textbox(visible=False),
             "provider_api_key": gr.Textbox(visible=False),
             "provider_api_endpoint": gr.Textbox(visible=False),
-            "model_name": gr.Textbox(visible=False)
+            "model_name": gr.Textbox(visible=False),
+            "tavily_api_key": gr.Textbox(visible=False)
         }
     
-    # Previous notebooks section (dev only)
-    if is_dev_environment():
-        with gr.Accordion("📂 Load Previous Notebook (Dev Only)", open=False):
-            notebook_dropdown = gr.Dropdown(
-                choices=get_notebook_options(),
-                value="None",
-                label="Select Previous Notebook",
-                info="Load a previously created notebook session"
-            )
-            with gr.Row():
-                load_notebook_btn = gr.Button("📖 Load Selected", variant="secondary")
-                refresh_notebooks_btn = gr.Button("🔄 Refresh List", variant="secondary")
-            
-            load_status = gr.Textbox(
-                label="Load Status",
-                interactive=False,
-                visible=False
-            )
+
     
-    with gr.Row():
-        generate_btn = gr.Button("Run!", variant="primary")
-        stop_btn = gr.Button("⏸️ Stop", variant="secondary")
-        continue_btn = gr.Button("▶️ Continue", variant="secondary")
-        clear_btn = gr.Button("Clear Notebook", variant="stop")
-    
-    # Status display
-    status_display = gr.Textbox(
-        value="⚪ Ready", 
-        label="Execution Status", 
-        interactive=False,
-        max_lines=1
-    )
+
     
     with gr.Accordion("Hardware Configuration ⚙️", open=False):
+        
+        env_vars = gr.Textbox(
+                label="Environment Variables",
+                placeholder="Enter environment variables (one per line):\nAPI_KEY=your_key_here\nDATA_PATH=/path/to/data\nDEBUG=true",
+                lines=5,
+                info="Add custom environment variables for the sandbox. Format: KEY=value (one per line)"
+            )
+            
+        env_info = gr.Markdown("""
+            **Environment Variables Info:**
+            - Variables will be available in the sandbox environment
+            - Use KEY=value format, one per line
+            - Common examples: API keys, data paths, configuration flags
+            - Variables are session-specific and not persisted between sessions
+            
+            ⚠️ **Security**: Avoid sensitive credentials in shared environments
+            """)
+        
         with gr.Row():
             gpu_type = gr.Dropdown(
                 choices=GPU_OPTIONS,
@@ -1298,28 +1414,32 @@ with gr.Blocks() as demo:
         ⚠️ **Note**: GPU instances cost more. Choose based on your workload.
         """)
     
-    with gr.Accordion("Environment Variables 🔧", open=False):
-        env_vars = gr.Textbox(
-            label="Environment Variables",
-            placeholder="Enter environment variables (one per line):\nAPI_KEY=your_key_here\nDATA_PATH=/path/to/data\nDEBUG=true",
-            lines=5,
-            info="Add custom environment variables for the sandbox. Format: KEY=value (one per line)"
-        )
-        
-        env_info = gr.Markdown("""
-        **Environment Variables Info:**
-        - Variables will be available in the sandbox environment
-        - Use KEY=value format, one per line
-        - Common examples: API keys, data paths, configuration flags
-        - Variables are session-specific and not persisted between sessions
-        
-        ⚠️ **Security**: Avoid sensitive credentials in shared environments
-        """)
+        # with gr.Accordion("Environment Variables 🔧", open=False):
+            
+            
+    with gr.Row():
+        generate_btn = gr.Button("Run!", variant="primary")
+        stop_btn = gr.Button("⏸️ Stop", variant="secondary")
+        continue_btn = gr.Button("▶️ Continue", variant="secondary")
+        clear_btn = gr.Button("Clear Notebook", variant="stop")
     
-    with gr.Accordion("Upload files ⬆ | Download notebook⬇", open=False):
-        files = gr.File(label="Upload files to use", file_count="multiple")
-        file = gr.File(TMP_DIR+"jupyter-agent.ipynb", label="Download Jupyter Notebook")
-
+    with gr.Row():
+        shutdown_btn = gr.Button("🔴 Shutdown Sandbox", variant="stop", visible=False)
+        sandbox_status = gr.Textbox(
+            show_label=False,
+            value="⚪ No sandbox active", 
+            # label="Sandbox Status", 
+            interactive=False,
+            max_lines=1
+        )
+    
+    # Status display
+    status_display = gr.Textbox(
+        value="⚪ Ready", 
+        label="Execution Status", 
+        interactive=False,
+        max_lines=1
+    )   
 
     generate_btn.click(
         fn=execute_jupyter_agent,
@@ -1327,7 +1447,8 @@ with gr.Blocks() as demo:
             user_input, files, msg_state, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars,
             api_key_components["modal_token_id"], api_key_components["modal_token_secret"], 
             api_key_components["hf_token"], api_key_components["provider_api_key"], 
-            api_key_components["provider_api_endpoint"], api_key_components["model_name"]
+            api_key_components["provider_api_endpoint"], api_key_components["model_name"],
+            api_key_components["tavily_api_key"], enable_web_search
         ],
         outputs=[html_output, msg_state, file],
         show_progress="hidden",
@@ -1345,13 +1466,20 @@ with gr.Blocks() as demo:
             user_input, files, msg_state, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars,
             api_key_components["modal_token_id"], api_key_components["modal_token_secret"], 
             api_key_components["hf_token"], api_key_components["provider_api_key"], 
-            api_key_components["provider_api_endpoint"], api_key_components["model_name"]
+            api_key_components["provider_api_endpoint"], api_key_components["model_name"],
+            api_key_components["tavily_api_key"], enable_web_search
         ],
         outputs=[html_output, msg_state, file],
         show_progress="hidden",
     )
 
     clear_btn.click(fn=clear, inputs=[msg_state], outputs=[html_output, msg_state])
+
+    shutdown_btn.click(
+        fn=shutdown_sandbox,
+        outputs=[sandbox_status, shutdown_btn],
+        show_progress="hidden",
+    )
     
     # Add event handlers for notebook loading (dev only)
     if is_dev_environment():
@@ -1363,7 +1491,8 @@ with gr.Blocks() as demo:
                 gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars,
                 api_key_components["modal_token_id"], api_key_components["modal_token_secret"], 
                 api_key_components["hf_token"], api_key_components["provider_api_key"], 
-                api_key_components["provider_api_endpoint"], api_key_components["model_name"]
+                api_key_components["provider_api_endpoint"], api_key_components["model_name"],
+                api_key_components["tavily_api_key"], enable_web_search
             ],
             show_progress="hidden"
         )
@@ -1387,6 +1516,14 @@ with gr.Blocks() as demo:
     #     inputs=None,
     #     outputs=[status_display],
     #     every=2,  # Update every 2 seconds
+    #     show_progress="hidden"
+    # )
+
+    # # Update button visibility periodically
+    # demo.load(
+    #     fn=update_sandbox_button_visibility,
+    #     outputs=[shutdown_btn],
+    #     every=3,  # Check every 3 seconds
     #     show_progress="hidden"
     # )
 
