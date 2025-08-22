@@ -19,8 +19,11 @@ if not get_space():
     except (ImportError, ModuleNotFoundError):
         pass
 from utils import (
-    run_interactive_notebook,
+    run_interactive_notebook_with_session_state,
+    SessionStateManager,
 )
+
+TMP_DIR = './temp/'
 
 # Environment and API key management utilities
 def get_environment():
@@ -145,12 +148,13 @@ def get_previous_notebooks():
                     # Format timestamp
                     formatted_time = datetime.fromtimestamp(modified).strftime("%Y-%m-%d %H:%M")
                     
-                    # Try to load session configuration for additional info
+                    # Try to load session state for additional info
                     config_info = ""
                     try:
-                        session_config = load_session_configuration(session_dir.name)
-                        if session_config:
-                            hardware = session_config.get("hardware", {})
+                        session_manager = SessionStateManager(session_dir.name, TMP_DIR)
+                        session_state = session_manager.load_state()
+                        if session_state:
+                            hardware = session_state.get("hardware_config", {})
                             gpu = hardware.get("gpu_type", "unknown")
                             config_info = f", {gpu}"
                     except Exception:
@@ -370,9 +374,6 @@ GPU_OPTIONS = [
     ("NVIDIA A100 80GB", "A100-80GB"),
     ("NVIDIA H100 (80GB)", "H100")
 ]
-TMP_DIR = './temp/'
-# model="Qwen/Qwen3-Coder-480B-A35B-Instruct:cerebras"
-# model="qwen-3-coder-480b"
 
 
 def initialize_openai_client():
@@ -480,6 +481,18 @@ def execute_jupyter_agent(
     logger.info(f"Hardware config: GPU={gpu_type}, CPU={cpu_cores}, Memory={memory_gb}GB, Timeout={timeout_sec}s")
     logger.info(f"User input length: {len(user_input)} characters")
     
+    # Initialize session state manager
+    session_manager = SessionStateManager(session_id, TMP_DIR)
+    
+    # Check if this is a continuing session
+    existing_session_state = session_manager.load_state()
+    is_continuing_session = existing_session_state is not None
+    
+    if is_continuing_session:
+        logger.info(f"Found existing session state for {session_id} - continuing from previous state")
+    else:
+        logger.info(f"No existing session state found for {session_id} - starting new session")
+    
     # Apply user-provided API keys if any are provided
     user_api_keys = {}
     if modal_token_id:
@@ -575,22 +588,7 @@ You can either:
         json.dump(init_notebook.data, f, indent=2)
     logger.info(f"Initialized notebook for session {session_id}")
     
-    # Save session configuration for future loading
-    save_session_configuration(
-        session_id=session_id,
-        gpu_type=gpu_type,
-        cpu_cores=cpu_cores, 
-        memory_gb=memory_gb,
-        timeout_sec=timeout_sec,
-        env_vars_text=env_vars_text,
-        modal_token_id=modal_token_id,
-        modal_token_secret=modal_token_secret,
-        hf_token=hf_token,
-        provider_api_key=provider_api_key,
-        provider_api_endpoint=provider_api_endpoint,
-        model_name=user_model_name,
-        files=files
-    )
+    # Session configuration is now handled by SessionStateManager
 
     if request.session_hash not in SANDBOXES:
         logger.info(f"Creating new Modal sandbox for session {session_id}")
@@ -687,13 +685,31 @@ You can either:
     else:
         logger.info(f"No files to upload for session {session_id}")
 
-    # Check if this session has a loaded notebook with existing message history
-    has_loaded_notebook = (session_id in EXECUTION_STATES and 
-                           "loaded_notebook" in EXECUTION_STATES[session_id])
-    
-    # Initialize message_history if it doesn't exist and no loaded notebook
-    if len(message_history) == 0 and not has_loaded_notebook:
-        logger.info(f"Initializing new conversation for session {session_id}")
+    # Initialize or continue session state
+    if is_continuing_session:
+        # Load existing session state
+        session_state = existing_session_state
+        
+        # Validate and repair conversation history to prevent API errors
+        session_manager.validate_and_repair_conversation(session_state)
+        
+        message_history = session_manager.get_conversation_history(session_state)
+        logger.info(f"Continuing session {session_id} with {len(message_history)} existing messages")
+        
+        # Add new user input if provided
+        if user_input and user_input.strip():
+            # Check if this input was already added
+            if not (message_history and 
+                    message_history[-1].get("role") == "user" and 
+                    message_history[-1].get("content") == user_input):
+                session_manager.add_message(session_state, "user", user_input)
+                message_history = session_manager.get_conversation_history(session_state)
+                logger.info(f"Added new user input to existing session {session_id}")
+            else:
+                logger.debug(f"User input already present in session {session_id}")
+    else:
+        # Create new session state
+        logger.info(f"Initializing new session {session_id}")
         
         # Format files section
         if files is None:
@@ -712,39 +728,50 @@ You can either:
         packages_section = "\n".join([f"- {package}" for package in packages_list])
         
         # Format the complete system prompt with named placeholders
-        sytem_prompt = DEFAULT_SYSTEM_PROMPT.replace("{AVAILABLE_FILES}", files_section)
-        sytem_prompt = sytem_prompt.replace("{GPU_TYPE}", gpu_info)
-        sytem_prompt = sytem_prompt.replace("{CPU_CORES}", str(cpu_cores))
-        sytem_prompt = sytem_prompt.replace("{MEMORY_GB}", str(memory_gb))
-        sytem_prompt = sytem_prompt.replace("{TIMEOUT_SECONDS}", str(timeout_sec))
-        sytem_prompt = sytem_prompt.replace("{AVAILABLE_PACKAGES}", packages_section)
-
-        message_history.append(
-            {
-                "role": "system",
-                "content": sytem_prompt,
-            }
+        system_prompt = DEFAULT_SYSTEM_PROMPT.replace("{AVAILABLE_FILES}", files_section)
+        system_prompt = system_prompt.replace("{GPU_TYPE}", gpu_info)
+        system_prompt = system_prompt.replace("{CPU_CORES}", str(cpu_cores))
+        system_prompt = system_prompt.replace("{MEMORY_GB}", str(memory_gb))
+        system_prompt = system_prompt.replace("{TIMEOUT_SECONDS}", str(timeout_sec))
+        system_prompt = system_prompt.replace("{AVAILABLE_PACKAGES}", packages_section)
+        
+        # Create session state with configuration
+        hardware_config = {
+            "gpu_type": gpu_type,
+            "cpu_cores": cpu_cores,
+            "memory_gb": memory_gb,
+            "timeout_sec": timeout_sec
+        }
+        
+        api_config = {
+            "model_name": model_name or user_model_name or "unknown",
+            "provider_endpoint": os.environ.get("PROVIDER_API_ENDPOINT") or provider_api_endpoint,
+            "provider_type": "openai_compatible"
+        }
+        
+        environment_config = {
+            "variables": env_vars_text or "",
+            "files_uploaded": filenames if filenames else []
+        }
+        
+        # Create initial session state
+        session_state = session_manager.create_initial_state(
+            hardware_config, api_config, environment_config, system_prompt
         )
-    elif has_loaded_notebook:
-        logger.info(f"Using loaded notebook conversation for session {session_id} (history length: {len(message_history)})")
-        # Clear the loaded notebook state after using it once
-        if "loaded_notebook" in EXECUTION_STATES[session_id]:
-            del EXECUTION_STATES[session_id]["loaded_notebook"]
-    else:
-        logger.info(f"Continuing existing conversation for session {session_id} (history length: {len(message_history)})")
+        
+        # Add user input if provided
+        if user_input and user_input.strip():
+            session_manager.add_message(session_state, "user", user_input)
+        
+        # Get conversation history
+        message_history = session_manager.get_conversation_history(session_state)
+        
+        # Save initial state
+        session_manager.save_state(session_state)
+        
+        logger.info(f"Created new session {session_id} with {len(message_history)} messages")
     
-    # Add user input if provided and not already added by continue_execution
-    if user_input and user_input.strip():
-        # Check if this input was already added by continue_execution
-        if not (message_history and 
-                message_history[-1].get("role") == "user" and 
-                message_history[-1].get("content") == user_input):
-            message_history.append({"role": "user", "content": user_input})
-            logger.debug(f"Added user message to history for session {session_id}")
-        else:
-            logger.debug(f"User message already in history for session {session_id}")
-
-    logger.debug(f"Message history for session {session_id}: {len(message_history)} messages")
+    logger.debug(f"Session {session_id} ready with {len(message_history)} messages")
 
     # Determine which tools to use based on web search toggle
     from utils import TOOLS
@@ -763,28 +790,46 @@ You can either:
 
     logger.info(f"Starting interactive notebook execution for session {session_id}")
     try:
-        for notebook_html, notebook_data, messages in run_interactive_notebook(
-            client, model_name, message_history, sbx, STOP_EVENTS[session_id], selected_tools
+        for notebook_html, notebook_data, messages in run_interactive_notebook_with_session_state(
+            client, model_name, session_manager, session_state, sbx, STOP_EVENTS[session_id], selected_tools
         ):
             message_history = messages
             logger.debug(f"Interactive notebook yield for session {session_id}")
-            yield notebook_html, message_history, TMP_DIR+"jupyter-agent.ipynb"
+            # Update session state and yield with legacy notebook file for UI compatibility
+            session_manager.update_notebook_data(session_state, notebook_data)
+            session_manager.save_state(session_state)
+            
+            # Create legacy notebook file for UI download compatibility
+            with open(save_dir, 'w', encoding='utf-8') as f:
+                json.dump(notebook_data, f, indent=2)
+                
+            yield notebook_html, message_history, save_dir
+            
     except Exception as e:
         logger.error(f"Error during interactive notebook execution for session {session_id}: {str(e)}")
+        # Save error state
+        session_manager.update_execution_state(session_state, is_running=False, last_execution_successful=False)
+        session_manager.save_state(session_state)
         raise
     
+    # Final save and cleanup
     try:
+        session_manager.update_execution_state(session_state, is_running=False)
+        session_manager.save_state(session_state)
+        logger.info(f"Final session state saved for session {session_id}")
+        
+        # Create final legacy notebook file for UI
         with open(save_dir, 'w', encoding='utf-8') as f:
             json.dump(notebook_data, f, indent=2)
-        logger.info(f"Final notebook saved for session {session_id}: {save_dir}")
+            
     except Exception as e:
-        logger.error(f"Failed to save final notebook for session {session_id}: {str(e)}")
+        logger.error(f"Failed to save final session state for session {session_id}: {str(e)}")
         raise
     
     yield notebook_html, message_history, save_dir
     logger.info(f"Completed execution for session {session_id}")
     
-    # Update execution state
+    # Update legacy execution state for compatibility
     if session_id in EXECUTION_STATES:
         EXECUTION_STATES[session_id]["running"] = False
 
@@ -828,7 +873,7 @@ def stop_execution(request: gr.Request):
             EXECUTION_STATES[session_id]["running"] = False
             EXECUTION_STATES[session_id]["paused"] = True
         
-        return "⏸️ Execution stopped - use Continue to resume"
+        return "⏸️ Execution stopped - click Run to resume"
     else:
         logger.warning(f"No active execution found for session {session_id}")
         return "❌ No active execution to stop"
@@ -859,45 +904,7 @@ def shutdown_sandbox(request: gr.Request):
         logger.info(f"No active sandbox found for session {session_id}")
         return "⚪ No active sandbox to shutdown", gr.Button(visible=False)
 
-def continue_execution(user_input, files, message_history, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars_text, 
-                      modal_token_id, modal_token_secret, hf_token, provider_api_key, provider_api_endpoint, user_model_name,
-                      tavily_api_key, enable_web_search, request: gr.Request):
-    """Continue execution after it was stopped"""
-    session_id = request.session_hash
-    logger.info(f"Continuing execution for session {session_id}")
-    
-    # Check if there's a loaded notebook for this session
-    if (session_id in EXECUTION_STATES and 
-        "loaded_notebook" in EXECUTION_STATES[session_id]):
-        
-        loaded_info = EXECUTION_STATES[session_id]["loaded_notebook"]
-        loaded_message_history = loaded_info["message_history"]
-        original_session = loaded_info["original_session"]
-        
-        logger.info(f"Found loaded notebook from session {original_session} with {len(loaded_message_history)} messages")
-        
-        # Use the loaded message history instead of the current one
-        message_history = loaded_message_history.copy()
-        
-        # If user provided new input, add it to the loaded history
-        if user_input and user_input.strip():
-            message_history.append({"role": "user", "content": user_input})
-            logger.info(f"Added new user input to loaded message history")
-    
-    # Reset stop event and execution state
-    if session_id in STOP_EVENTS:
-        STOP_EVENTS[session_id].clear()
-        logger.info(f"Cleared stop event for session {session_id}")
-    
-    if session_id in EXECUTION_STATES:
-        EXECUTION_STATES[session_id]["running"] = True
-        EXECUTION_STATES[session_id]["paused"] = False
-        logger.info(f"Reset execution state for session {session_id}")
-    
-    # Continue with normal execution - yield from the generator
-    yield from execute_jupyter_agent(user_input, files, message_history, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars_text,
-                                    modal_token_id, modal_token_secret, hf_token, provider_api_key, provider_api_endpoint, user_model_name,
-                                    tavily_api_key, enable_web_search, request)
+# continue_execution function removed - functionality integrated into execute_jupyter_agent
 
 def get_execution_status(request: gr.Request):
     """Get the current execution status for UI updates"""
@@ -1025,8 +1032,20 @@ def load_previous_notebook(notebook_choice, request: gr.Request):
         with open(notebook_path, 'r') as f:
             notebook_data = json.load(f)
         
-        # Load session configuration
-        session_config = load_session_configuration(session_id)
+        # Load session state 
+        temp_session_manager = SessionStateManager(session_id, TMP_DIR)
+        session_state = temp_session_manager.load_state()
+        session_config = None  # For backward compatibility
+        
+        # Extract config from session state for UI restoration
+        if session_state:
+            session_config = {
+                "hardware": session_state.get("hardware_config", {}),
+                "environment_vars": session_state.get("environment", {}).get("variables", ""),
+                "api_keys": {
+                    "model_name": session_state.get("api_config", {}).get("model_name", "")
+                }
+            }
         
         # Create a new JupyterNotebook instance with the loaded data
         loaded_notebook = JupyterNotebook()
@@ -1113,66 +1132,8 @@ def refresh_notebook_options():
     """Refresh the notebook options dropdown"""
     return gr.Dropdown(choices=get_notebook_options(), value="None")
 
-def save_session_configuration(session_id, gpu_type, cpu_cores, memory_gb, timeout_sec, 
-                               env_vars_text, modal_token_id, modal_token_secret, hf_token,
-                               provider_api_key, provider_api_endpoint, model_name, files):
-    """Save the complete session configuration to a JSON file"""
-    try:
-        config = {
-            "session_id": session_id,
-            "timestamp": datetime.now().isoformat(),
-            "hardware": {
-                "gpu_type": gpu_type,
-                "cpu_cores": cpu_cores,
-                "memory_gb": memory_gb,
-                "timeout_sec": timeout_sec
-            },
-            "environment_vars": env_vars_text,
-            "api_keys": {
-                "modal_token_id": modal_token_id if modal_token_id else "",
-                "modal_token_secret": modal_token_secret if modal_token_secret else "",
-                "hf_token": hf_token if hf_token else "",
-                "provider_api_key": provider_api_key if provider_api_key else "",
-                "provider_api_endpoint": provider_api_endpoint if provider_api_endpoint else "",
-                "model_name": model_name if model_name else ""
-            },
-            "files": [Path(f).name for f in files] if files else [],
-            "environment": get_environment()
-        }
-        
-        # Save to session directory
-        session_dir = Path(TMP_DIR) / session_id
-        config_file = session_dir / "session_config.json"
-        
-        with open(config_file, 'w') as f:
-            json.dump(config, f, indent=2)
-            
-        logger.info(f"Saved session configuration for {session_id}")
-        return config
-        
-    except Exception as e:
-        logger.error(f"Failed to save session configuration: {str(e)}")
-        return None
-
-def load_session_configuration(session_id):
-    """Load the complete session configuration from a JSON file"""
-    try:
-        session_dir = Path(TMP_DIR) / session_id
-        config_file = session_dir / "session_config.json"
-        
-        if not config_file.exists():
-            logger.warning(f"No session configuration found for {session_id}")
-            return None
-            
-        with open(config_file, 'r') as f:
-            config = json.load(f)
-            
-        logger.info(f"Loaded session configuration for {session_id}")
-        return config
-        
-    except Exception as e:
-        logger.error(f"Failed to load session configuration: {str(e)}")
-        return None
+# Legacy session configuration functions removed - replaced by SessionStateManager
+# All session data is now stored in a single comprehensive session_state.json file
 
 
 css = """
@@ -1204,7 +1165,8 @@ with gr.Blocks() as demo:
     html_output = gr.HTML(value=JupyterNotebook().render())
     
     user_input = gr.Textbox(
-        value="train a 5 neuron neural network to classify the iris dataset",
+        # value="train a 5 neuron neural network to classify the iris dataset",
+        value="can you finetune llama 3.2 1b on tiny stories dataset and using unsloth",
         lines=3,
         label="Agent task"
     )
@@ -1320,7 +1282,7 @@ with gr.Blocks() as demo:
             if "MODEL_NAME" in missing_keys:
                 api_key_components["model_name"] = gr.Textbox(
                     label="Model Name",
-                    placeholder="claude-sonnet-4",
+                    placeholder="claude-sonnet-4-20250514",
                     info="Name of the model to use"
                 )
             else:
@@ -1420,7 +1382,7 @@ with gr.Blocks() as demo:
     with gr.Row():
         generate_btn = gr.Button("Run!", variant="primary")
         stop_btn = gr.Button("⏸️ Stop", variant="secondary")
-        continue_btn = gr.Button("▶️ Continue", variant="secondary")
+        # continue_btn removed - Run button handles continuation automatically
         clear_btn = gr.Button("Clear Notebook", variant="stop")
     
     with gr.Row():
@@ -1460,18 +1422,7 @@ with gr.Blocks() as demo:
         show_progress="hidden",
     )
 
-    continue_btn.click(
-        fn=continue_execution,
-        inputs=[
-            user_input, files, msg_state, gpu_type, cpu_cores, memory_gb, timeout_sec, env_vars,
-            api_key_components["modal_token_id"], api_key_components["modal_token_secret"], 
-            api_key_components["hf_token"], api_key_components["provider_api_key"], 
-            api_key_components["provider_api_endpoint"], api_key_components["model_name"],
-            api_key_components["tavily_api_key"], enable_web_search
-        ],
-        outputs=[html_output, msg_state, file],
-        show_progress="hidden",
-    )
+    # continue_btn.click handler removed - Run button handles continuation automatically
 
     clear_btn.click(fn=clear, inputs=[msg_state], outputs=[html_output, msg_state])
 

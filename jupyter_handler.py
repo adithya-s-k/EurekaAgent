@@ -285,9 +285,21 @@ html_exporter = HTMLExporter(config=config, template_name="classic")
 
 
 class JupyterNotebook:
-    def __init__(self, messages=None):
+    def __init__(self, messages=None, session_state_data=None):
         self.exec_count = 0
         self.countdown_info = None
+        
+        # If session_state_data is provided, use it directly
+        if session_state_data and "notebook_data" in session_state_data:
+            logger.info("Initializing JupyterNotebook from session state")
+            self.data = session_state_data["notebook_data"]
+            # Count existing code cells to maintain execution count
+            self.exec_count = len([cell for cell in self.data.get("cells", []) 
+                                 if cell.get("cell_type") == "code" and cell.get("execution_count")])
+            logger.info(f"JupyterNotebook initialized from session state with {len(self.data['cells'])} cells, exec_count={self.exec_count}")
+            return
+        
+        # Legacy initialization path
         if messages is None:
             messages = []
         logger.debug(f"Initializing JupyterNotebook with {len(messages)} messages")
@@ -756,6 +768,24 @@ class JupyterNotebook:
             logger.debug("Applied custom CSS to notebook")
         return notebook_body
     
+    @classmethod
+    def from_session_state(cls, session_state_data):
+        """Create JupyterNotebook instance from session state data"""
+        return cls(session_state_data=session_state_data)
+    
+    def get_session_notebook_data(self):
+        """Get notebook data in format suitable for session state"""
+        return self.data.copy()
+    
+    def update_from_session_state(self, session_state_data):
+        """Update notebook data from session state"""
+        if "notebook_data" in session_state_data:
+            self.data = session_state_data["notebook_data"].copy()
+            # Update execution count based on existing cells
+            self.exec_count = len([cell for cell in self.data.get("cells", []) 
+                                 if cell.get("cell_type") == "code" and cell.get("execution_count")])
+            logger.debug(f"Updated notebook from session state: {len(self.data['cells'])} cells, exec_count={self.exec_count}")
+    
 def main():
     """Create a mock notebook to test styling"""
     # Create mock messages
@@ -783,6 +813,11 @@ def main():
     
     print("Mock notebook saved as 'mock_notebook.html'")
     print("Open it in your browser to see the styling changes.")
+
+def create_notebook_from_session_state(session_state):
+    """Helper function to create JupyterNotebook from session state"""
+    return JupyterNotebook.from_session_state(session_state)
+
 
 if __name__ == "__main__":
     main()

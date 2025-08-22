@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import datetime
+from pathlib import Path
+from typing import Dict, List, Any, Optional
 from tavily import TavilyClient
 
 # Configure logging for utils module
@@ -53,6 +55,281 @@ TOOLS = [
 # TOOLS = TOOLS[:1]
 
 MAX_TURNS = 20
+
+
+class SessionStateManager:
+    """Manages comprehensive session state in a single JSON file"""
+    
+    def __init__(self, session_id: str, base_dir: str = './temp/'):
+        self.session_id = session_id
+        self.base_dir = Path(base_dir)
+        self.session_dir = self.base_dir / session_id
+        self.state_file = self.session_dir / 'session_state.json'
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"SessionStateManager initialized for {session_id}")
+    
+    def create_initial_state(self, hardware_config: Dict, api_config: Dict, 
+                           environment: Dict, system_prompt: str) -> Dict:
+        """Create initial session state structure"""
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        
+        initial_state = {
+            "session_id": self.session_id,
+            "created_at": timestamp,
+            "last_updated": timestamp,
+            "version": "1.0",
+            
+            "hardware_config": hardware_config,
+            "api_config": api_config,
+            "environment": environment,
+            
+            "conversation_history": [
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                    "timestamp": timestamp,
+                    "metadata": {"type": "system_initialization"}
+                }
+            ],
+            
+            "llm_interactions": [],  # Complete API call logs
+            "tool_executions": [],   # All tool calls and results
+            
+            "notebook_data": {
+                "cells": [],
+                "metadata": {
+                    "kernel_info": {"name": "python3"},
+                    "language_info": {"name": "python", "version": "3.12"},
+                },
+                "nbformat": 4,
+                "nbformat_minor": 0
+            },
+            
+            "execution_state": {
+                "current_turn": 0,
+                "max_turns": MAX_TURNS,
+                "is_running": False,
+                "is_paused": False,
+                "last_execution_successful": None,
+                "sandbox_active": False,
+                "sandbox_info": None
+            },
+            
+            "session_stats": {
+                "total_messages": 1,
+                "total_code_executions": 0,
+                "total_searches": 0,
+                "total_errors": 0,
+                "session_duration_seconds": 0
+            }
+        }
+        
+        logger.info(f"Created initial session state for {self.session_id}")
+        return initial_state
+    
+    def load_state(self) -> Optional[Dict]:
+        """Load session state from file"""
+        if not self.state_file.exists():
+            logger.info(f"No existing session state found for {self.session_id}")
+            return None
+            
+        try:
+            with open(self.state_file, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            logger.info(f"Loaded session state for {self.session_id} with {len(state.get('conversation_history', []))} messages")
+            return state
+        except Exception as e:
+            logger.error(f"Failed to load session state for {self.session_id}: {str(e)}")
+            return None
+    
+    def save_state(self, state: Dict) -> bool:
+        """Save session state to file"""
+        try:
+            # Update last_updated timestamp
+            state["last_updated"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            
+            # Update session stats
+            if "session_stats" not in state:
+                state["session_stats"] = {}
+            
+            created_at = datetime.datetime.fromisoformat(state["created_at"])
+            current_time = datetime.datetime.now(datetime.timezone.utc)
+            state["session_stats"]["session_duration_seconds"] = int((current_time - created_at).total_seconds())
+            state["session_stats"]["total_messages"] = len(state.get("conversation_history", []))
+            
+            with open(self.state_file, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2, ensure_ascii=False)
+            
+            logger.debug(f"Saved session state for {self.session_id} ({len(json.dumps(state))} characters)")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save session state for {self.session_id}: {str(e)}")
+            return False
+    
+    def log_llm_interaction(self, state: Dict, request_data: Dict, response_data: Dict, 
+                           model: str, turn: int) -> None:
+        """Log complete LLM API interaction"""
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        
+        interaction = {
+            "timestamp": timestamp,
+            "turn": turn,
+            "model": model,
+            "request": {
+                "messages_count": len(request_data.get("messages", [])),
+                "tools_count": len(request_data.get("tools", [])),
+                "model": request_data.get("model"),
+                "tool_choice": request_data.get("tool_choice")
+            },
+            "response": {
+                "content": response_data.get("choices", [{}])[0].get("message", {}).get("content"),
+                "tool_calls": response_data.get("choices", [{}])[0].get("message", {}).get("tool_calls"),
+                "finish_reason": response_data.get("choices", [{}])[0].get("finish_reason"),
+                "usage": response_data.get("usage")
+            }
+        }
+        
+        if "llm_interactions" not in state:
+            state["llm_interactions"] = []
+        state["llm_interactions"].append(interaction)
+        
+        logger.debug(f"Logged LLM interaction for turn {turn} in session {self.session_id}")
+    
+    def log_tool_execution(self, state: Dict, tool_call_id: str, tool_name: str, 
+                          tool_args: Dict, result: str, execution_data: Any = None) -> None:
+        """Log tool execution with full details"""
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        
+        tool_execution = {
+            "timestamp": timestamp,
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "arguments": tool_args,
+            "result_summary": result[:500] + "..." if len(result) > 500 else result,
+            "result_length": len(result),
+            "execution_data": execution_data,
+            "success": execution_data is None or (hasattr(execution_data, 'error') and execution_data.error is None) if execution_data else True
+        }
+        
+        if "tool_executions" not in state:
+            state["tool_executions"] = []
+        state["tool_executions"].append(tool_execution)
+        
+        # Update stats
+        if tool_name == "add_and_execute_jupyter_code_cell":
+            state["session_stats"]["total_code_executions"] = state["session_stats"].get("total_code_executions", 0) + 1
+        elif tool_name == "tavily_search":
+            state["session_stats"]["total_searches"] = state["session_stats"].get("total_searches", 0) + 1
+            
+        if not tool_execution["success"]:
+            state["session_stats"]["total_errors"] = state["session_stats"].get("total_errors", 0) + 1
+        
+        logger.debug(f"Logged tool execution {tool_name} ({tool_call_id}) in session {self.session_id}")
+    
+    def add_message(self, state: Dict, role: str, content: str, 
+                   tool_calls: List = None, tool_call_id: str = None, 
+                   raw_execution: Any = None, metadata: Dict = None) -> None:
+        """Add message to conversation history with full context"""
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        
+        message = {
+            "role": role,
+            "content": content,
+            "timestamp": timestamp
+        }
+        
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        if tool_call_id:
+            message["tool_call_id"] = tool_call_id
+        if raw_execution:
+            message["raw_execution"] = raw_execution
+        if metadata:
+            message["metadata"] = metadata
+            
+        state["conversation_history"].append(message)
+        logger.debug(f"Added {role} message to session {self.session_id} conversation history")
+    
+    def update_execution_state(self, state: Dict, **kwargs) -> None:
+        """Update execution state fields"""
+        for key, value in kwargs.items():
+            if key in state["execution_state"]:
+                state["execution_state"][key] = value
+                logger.debug(f"Updated execution state {key}={value} for session {self.session_id}")
+    
+    def update_notebook_data(self, state: Dict, notebook_data: Dict) -> None:
+        """Update notebook data in session state"""
+        state["notebook_data"] = notebook_data
+        logger.debug(f"Updated notebook data for session {self.session_id} ({len(notebook_data.get('cells', []))} cells)")
+    
+    def get_conversation_history(self, state: Dict) -> List[Dict]:
+        """Get conversation history suitable for LLM API calls"""
+        return state.get("conversation_history", [])
+    
+    def validate_and_repair_conversation(self, state: Dict) -> None:
+        """Validate and repair conversation history to ensure tool calls have responses"""
+        conversation = state.get("conversation_history", [])
+        if not conversation:
+            return
+            
+        pending_tool_calls = set()
+        valid_messages = []
+        
+        for message in conversation:
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                # Track tool calls
+                for tool_call in message["tool_calls"]:
+                    pending_tool_calls.add(tool_call["id"])
+                valid_messages.append(message)
+                
+            elif message.get("role") == "tool" and message.get("tool_call_id"):
+                # Remove from pending when we find a response
+                pending_tool_calls.discard(message["tool_call_id"])
+                valid_messages.append(message)
+                
+            else:
+                # Regular message (system, user, assistant without tool calls)
+                valid_messages.append(message)
+        
+        # If there are incomplete tool calls, remove the assistant messages that created them
+        if pending_tool_calls:
+            logger.warning(f"Found incomplete tool calls in conversation: {pending_tool_calls}")
+            logger.warning("Removing incomplete assistant messages to repair conversation")
+            
+            repaired_messages = []
+            for message in valid_messages:
+                if (message.get("role") == "assistant" and 
+                    message.get("tool_calls") and 
+                    any(tc["id"] in pending_tool_calls for tc in message["tool_calls"])):
+                    logger.debug("Removing assistant message with incomplete tool calls")
+                    continue
+                repaired_messages.append(message)
+            
+            # Update conversation history
+            state["conversation_history"] = repaired_messages
+            logger.info(f"Repaired conversation: {len(conversation)} -> {len(repaired_messages)} messages")
+            
+            # Save the repaired state
+            self.save_state(state)
+    
+    def session_exists(self) -> bool:
+        """Check if session state file exists"""
+        return self.state_file.exists()
+    
+    def get_session_summary(self, state: Dict) -> str:
+        """Get human-readable session summary"""
+        stats = state.get("session_stats", {})
+        created = datetime.datetime.fromisoformat(state["created_at"])
+        
+        return f"""Session {self.session_id}:
+- Created: {created.strftime('%Y-%m-%d %H:%M:%S UTC')}
+- Messages: {stats.get('total_messages', 0)}
+- Code Executions: {stats.get('total_code_executions', 0)}
+- Web Searches: {stats.get('total_searches', 0)}
+- Errors: {stats.get('total_errors', 0)}
+- Duration: {stats.get('session_duration_seconds', 0)}s
+- Hardware: {state.get('hardware_config', {}).get('gpu_type', 'unknown')}
+- Model: {state.get('api_config', {}).get('model_name', 'unknown')}"""
 
 
 def execute_code(sbx, code):
@@ -117,20 +394,59 @@ def parse_exec_result_llm(execution, max_code_output=1000):
 
 def clean_messages_for_api(messages):
     """
-    Create a clean copy of messages without raw_execution fields for API calls.
-    This prevents 413 errors caused by large execution data.
+    Create a clean copy of messages without raw_execution fields and metadata for API calls.
+    Also validates that tool calls have corresponding tool responses.
+    This prevents 413 errors and API validation errors.
     """
     logger.debug(f"Cleaning {len(messages)} messages for API call")
     cleaned_messages = []
     raw_execution_count = 0
+    metadata_count = 0
+    pending_tool_calls = set()
+    
     for message in messages:
         cleaned_message = message.copy()
+        
+        # Remove raw_execution data
         if "raw_execution" in cleaned_message:
             cleaned_message.pop("raw_execution")
             raw_execution_count += 1
+            
+        # Remove metadata and timestamp
+        if "metadata" in cleaned_message:
+            cleaned_message.pop("metadata")
+            metadata_count += 1
+        if "timestamp" in cleaned_message:
+            cleaned_message.pop("timestamp")
+        
+        # Track tool calls and responses for validation
+        if cleaned_message.get("role") == "assistant" and cleaned_message.get("tool_calls"):
+            for tool_call in cleaned_message["tool_calls"]:
+                pending_tool_calls.add(tool_call["id"])
+        elif cleaned_message.get("role") == "tool" and cleaned_message.get("tool_call_id"):
+            pending_tool_calls.discard(cleaned_message["tool_call_id"])
+            
         cleaned_messages.append(cleaned_message)
     
-    logger.debug(f"Removed raw_execution from {raw_execution_count} messages")
+    # If there are pending tool calls without responses, remove the assistant message with tool calls
+    if pending_tool_calls:
+        logger.warning(f"Found {len(pending_tool_calls)} tool calls without responses: {pending_tool_calls}")
+        logger.warning("Removing incomplete tool call messages to prevent API errors")
+        
+        # Remove messages with incomplete tool calls
+        filtered_messages = []
+        for message in cleaned_messages:
+            if (message.get("role") == "assistant" and 
+                message.get("tool_calls") and 
+                any(tc["id"] in pending_tool_calls for tc in message["tool_calls"])):
+                logger.debug("Removing assistant message with incomplete tool calls")
+                continue
+            filtered_messages.append(message)
+        
+        cleaned_messages = filtered_messages
+    
+    logger.debug(f"Cleaned messages: removed raw_execution from {raw_execution_count}, metadata from {metadata_count}")
+    logger.debug(f"Final cleaned message count: {len(cleaned_messages)}")
     return cleaned_messages
 
 
@@ -222,9 +538,15 @@ def format_search_results_for_llm(response):
     return formatted
 
 
-def run_interactive_notebook(client, model, messages, sbx, stop_event=None, tools=None):
-    logger.info(f"Starting interactive notebook with {len(messages)} initial messages")
+def run_interactive_notebook_with_session_state(client, model, session_state_manager, session_state, sbx, stop_event=None, tools=None):
+    logger.info(f"Starting interactive notebook with session state for {session_state_manager.session_id}")
+    
+    # Get conversation history from session state
+    messages = session_state_manager.get_conversation_history(session_state)
     notebook = JupyterNotebook(messages)
+    
+    # Update execution state
+    session_state_manager.update_execution_state(session_state, is_running=True, sandbox_active=True)
     
     # Use provided tools or default to all tools
     if tools is None:
@@ -233,20 +555,35 @@ def run_interactive_notebook(client, model, messages, sbx, stop_event=None, tool
     try:
         sbx_info = sbx.get_info()
         notebook.add_sandbox_countdown(sbx_info.started_at, sbx_info.end_at)
+        
+        # Store sandbox info in session state
+        session_state["execution_state"]["sandbox_info"] = {
+            "started_at": sbx_info.started_at.isoformat(),
+            "end_at": sbx_info.end_at.isoformat(),
+            "timeout_seconds": int((sbx_info.end_at - sbx_info.started_at).total_seconds())
+        }
+        
         logger.debug(f"Added sandbox countdown: {sbx_info.started_at} to {sbx_info.end_at}")
     except Exception as e:
         logger.warning(f"Failed to get sandbox info: {str(e)}")
     
     logger.debug("Initial notebook yield in 'generating' mode")
+    
+    # Update notebook data in session state
+    session_state_manager.update_notebook_data(session_state, notebook.data)
+    
+    # Save initial state
+    session_state_manager.save_state(session_state)
+    
     yield notebook.render(mode="generating"), notebook.data, messages
     
     max_code_output = 1000
-    turns = 0
+    turns = session_state["execution_state"]["current_turn"]
     done = False
     previous_execution_had_error = False
     previous_execution_had_warnings = False
     
-    logger.info(f"Starting interactive loop with max_output={max_code_output}, max_turns={MAX_TURNS}")
+    logger.info(f"Starting interactive loop from turn {turns} with max_output={max_code_output}, max_turns={MAX_TURNS}")
 
     while not done and (turns <= MAX_TURNS) and (stop_event is None or not stop_event.is_set()):
         turns += 1
@@ -255,13 +592,22 @@ def run_interactive_notebook(client, model, messages, sbx, stop_event=None, tool
         try:
             # Inference client call - might fail
             logger.debug(f"Making API call to {model} with {len(messages)} messages")
-            response = client.chat.completions.create(
-                messages=clean_messages_for_api(messages),
-                model=model,
-                tools=tools,
-                tool_choice="auto",
-            )
+            
+            # Prepare request data for logging
+            request_data = {
+                "messages": clean_messages_for_api(messages),
+                "model": model,
+                "tools": tools,
+                "tool_choice": "auto"
+            }
+            
+            response = client.chat.completions.create(**request_data)
             logger.debug("API call successful")
+            
+            # Log the complete LLM interaction
+            session_state_manager.log_llm_interaction(
+                session_state, request_data, response.model_dump(), model, turns
+            )
         except Exception as e:
             # Handle inference client errors
             logger.error(f"Inference failed on turn {turns}: {str(e)}")
@@ -326,6 +672,22 @@ An error occurred while communicating with the AI service:
 - If the problem persists, contact support"""
             
             notebook.add_error(detailed_error)
+            
+            # Add error to session state
+            session_state_manager.add_message(
+                session_state, "assistant", detailed_error, 
+                metadata={"type": "error", "error_type": "api_error", "turn": turns}
+            )
+            
+            # Update execution state
+            session_state_manager.update_execution_state(
+                session_state, is_running=False, last_execution_successful=False
+            )
+            
+            # Update notebook data and save state
+            session_state_manager.update_notebook_data(session_state, notebook.data)
+            session_state_manager.save_state(session_state)
+            
             yield notebook.render(mode="error"), notebook.data, messages
             return
 
@@ -342,29 +704,48 @@ An error occurred while communicating with the AI service:
         else:
             logger.debug("Skipping empty assistant response")
 
-        # Handle tool calls
+        # Handle tool calls and add assistant message to both messages list and session state
         if tool_calls:
             logger.info(f"Processing {len(tool_calls)} tool calls on turn {turns}")
-        
-        for i, tool_call in enumerate(tool_calls):
-            logger.debug(f"Processing tool call {i+1}/{len(tool_calls)}: {tool_call.function.name}")
-            # Add assistant message with tool call to history
+            # Add assistant message with ALL tool calls to messages history (once)
             assistant_message = {
                 "role": "assistant",
                 "content": full_response,
                 "tool_calls": [
                     {
-                        "id": tool_call.id,
+                        "id": tc.id,
                         "type": "function",
                         "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
                         },
-                    }
+                    } for tc in tool_calls
                 ],
             }
             messages.append(assistant_message)
-            logger.debug("Added assistant message with tool call to history")
+            
+            # Also add to session state
+            session_state_manager.add_message(
+                session_state, "assistant", full_response,
+                tool_calls=[{
+                    "id": tc.id,
+                    "type": "function", 
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                } for tc in tool_calls],
+                metadata={"turn": turns, "type": "thinking"}
+            )
+            logger.debug(f"Added assistant message with {len(tool_calls)} tool calls to history and session state")
+        elif full_response.strip():
+            # If no tool calls but we have content, add regular assistant message
+            messages.append({"role": "assistant", "content": full_response})
+            session_state_manager.add_message(
+                session_state, "assistant", full_response,
+                metadata={"turn": turns, "type": "thinking"}
+            )
+            logger.debug("Added regular assistant message to history and session state")
+        
+        for i, tool_call in enumerate(tool_calls):
+            logger.debug(f"Processing tool call {i+1}/{len(tool_calls)}: {tool_call.function.name}")
 
             if tool_call.function.name == "add_and_execute_jupyter_code_cell":
                 logger.debug(f"Processing code execution tool call: {tool_call.id}")
@@ -408,6 +789,14 @@ The execution was stopped by user request before the code could run."""
                     # Update error and warning tracking for next iteration
                     previous_execution_had_error = notebook.has_execution_error(execution)
                     previous_execution_had_warnings = notebook.has_execution_warnings(execution)
+                    # Log tool execution in session state
+                    tool_args = json.loads(tool_call.function.arguments)
+                    tool_response_content = parse_exec_result_llm(execution, max_code_output=max_code_output)
+                    session_state_manager.log_tool_execution(
+                        session_state, tool_call.id, "add_and_execute_jupyter_code_cell",
+                        tool_args, tool_response_content, execution
+                    )
+                    
                     if previous_execution_had_error:
                         logger.warning("Code execution resulted in error")
                     elif previous_execution_had_warnings:
@@ -459,19 +848,25 @@ An error occurred while executing the code in the sandbox:
                     yield notebook.render(mode="error"), notebook.data, messages
                     return
 
-                # Prepare tool response
-                tool_response_content = parse_exec_result_llm(execution, max_code_output=max_code_output)
+                # Prepare tool response (already computed above)
                 raw_execution = notebook.parse_exec_result_nb(execution)
                 
                 logger.debug(f"Tool response: {len(tool_response_content)} chars content, {len(raw_execution)} raw outputs")
                 
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": tool_response_content,
-                        "raw_execution": raw_execution
-                    }
+                # Add tool response to messages and session state
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": tool_response_content,
+                    "raw_execution": raw_execution
+                }
+                messages.append(tool_message)
+                
+                # Add to session state with full context
+                session_state_manager.add_message(
+                    session_state, "tool", tool_response_content,
+                    tool_call_id=tool_call.id, raw_execution=raw_execution,
+                    metadata={"turn": turns, "execution_successful": not previous_execution_had_error}
                 )
             elif tool_call.function.name == "tavily_search":
                 logger.debug(f"Processing search tool call: {tool_call.id}")
@@ -488,32 +883,56 @@ An error occurred while executing the code in the sandbox:
                     search_results = tavily_search(query)
                     logger.info("Search completed successfully")
                     
+                    # Log search tool execution
+                    tool_args = json.loads(tool_call.function.arguments)
+                    session_state_manager.log_tool_execution(
+                        session_state, tool_call.id, "tavily_search",
+                        tool_args, search_results
+                    )
+                    
                     # Add search results to notebook
                     notebook.add_markdown(search_results, "assistant")
                     
-                    # Add tool response to messages
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": search_results
-                        }
+                    # Add tool response to messages and session state
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": search_results
+                    }
+                    messages.append(tool_message)
+                    
+                    session_state_manager.add_message(
+                        session_state, "tool", search_results,
+                        tool_call_id=tool_call.id,
+                        metadata={"turn": turns, "search_successful": True}
                     )
                     
                 except Exception as e:
                     error_message = f"❌ Search failed: {str(e)}"
                     logger.error(f"Search tool call failed: {str(e)}")
                     
+                    # Log failed search
+                    tool_args = json.loads(tool_call.function.arguments)
+                    session_state_manager.log_tool_execution(
+                        session_state, tool_call.id, "tavily_search",
+                        tool_args, error_message
+                    )
+                    
                     # Add error to notebook
                     notebook.add_markdown(error_message, "assistant")
                     
-                    # Add error response to messages
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": error_message
-                        }
+                    # Add error response to messages and session state
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": error_message
+                    }
+                    messages.append(tool_message)
+                    
+                    session_state_manager.add_message(
+                        session_state, "tool", error_message,
+                        tool_call_id=tool_call.id,
+                        metadata={"turn": turns, "search_successful": False, "error": str(e)}
                     )
             else:
                 logger.warning(f"Unknown tool call function: {tool_call.function.name}")
@@ -523,11 +942,37 @@ An error occurred while executing the code in the sandbox:
             if len(full_response.strip())==0:
                 logger.error("Assistant provided no content and no tool calls")
                 notebook.add_error(f"No tool call and empty assistant response:\n{response.model_dump_json(indent=2)}")
-            messages.append({"role": "assistant", "content": full_response})
+            
+            # Only add the final assistant message if we didn't already add it above
+            # (in the elif full_response.strip() block)
+            if full_response.strip():
+                # Check if we already added this message above
+                if not any(msg.get("role") == "assistant" and msg.get("content") == full_response 
+                          for msg in messages[-3:]):  # Check recent messages
+                    messages.append({"role": "assistant", "content": full_response})
+                    session_state_manager.add_message(
+                        session_state, "assistant", full_response,
+                        metadata={"turn": turns, "type": "final_response"}
+                    )
+                    logger.debug("Added final assistant response to history and session state")
+                else:
+                    logger.debug("Assistant message already added to history, skipping duplicate")
+            
             done = True
             
+        # Update session state after each turn
+        session_state_manager.update_execution_state(
+            session_state, current_turn=turns, last_execution_successful=not previous_execution_had_error
+        )
+        session_state_manager.update_notebook_data(session_state, notebook.data)
+        session_state_manager.save_state(session_state)
+        
         if done:
             logger.info(f"Interactive notebook completed after {turns} turns")
+            session_state_manager.update_execution_state(
+                session_state, is_running=False, sandbox_active=True
+            )
+            session_state_manager.save_state(session_state)
             yield notebook.render(mode="done"), notebook.data, messages
         else:
             logger.debug(f"Turn {turns} completed, yielding in 'generating' mode")
@@ -535,16 +980,69 @@ An error occurred while executing the code in the sandbox:
     
     if turns > MAX_TURNS:
         logger.warning(f"Interactive notebook reached maximum turns ({MAX_TURNS})")
-        notebook.add_error(f"**Maximum Turns Reached** 🔄\n\nThe conversation has reached the maximum number of turns ({MAX_TURNS}). This is a safety limit to prevent infinite loops.\n\n**What you can try:**\n- Start a new conversation\n- Clear the notebook and begin fresh\n- Contact support if you need a higher turn limit")
+        error_msg = f"**Maximum Turns Reached** 🔄\n\nThe conversation has reached the maximum number of turns ({MAX_TURNS}). This is a safety limit to prevent infinite loops.\n\n**What you can try:**\n- Start a new conversation\n- Clear the notebook and begin fresh\n- Contact support if you need a higher turn limit"
+        notebook.add_error(error_msg)
+        
+        # Add error to session state
+        session_state_manager.add_message(
+            session_state, "assistant", error_msg,
+            metadata={"type": "error", "error_type": "max_turns_exceeded", "turn": turns}
+        )
+        
+        # Update final state
+        session_state_manager.update_execution_state(
+            session_state, is_running=False, last_execution_successful=False
+        )
+        session_state_manager.update_notebook_data(session_state, notebook.data)
+        session_state_manager.save_state(session_state)
+        
         yield notebook.render(mode="error"), notebook.data, messages
     elif stop_event and stop_event.is_set():
         logger.info("Interactive notebook stopped by user")
+        
         # Add a stopped message to the notebook
         stopped_message = """**Execution Stopped** ⏸️
 
-The execution was stopped by user request. You can:
-- Click "▶️ Continue" to resume from where you left off
-- Start a new task by typing a new message
-- Clear the notebook to start fresh"""
+The execution was stopped by user request. You can resume by clicking Run again."""
         notebook.add_markdown(stopped_message, "assistant")
+        
+        # Add stopped message to session state
+        session_state_manager.add_message(
+            session_state, "assistant", stopped_message,
+            metadata={"type": "status", "status_type": "stopped_by_user", "turn": turns}
+        )
+        
+        # Update state to indicate pause
+        session_state_manager.update_execution_state(
+            session_state, is_running=False, is_paused=True
+        )
+        session_state_manager.update_notebook_data(session_state, notebook.data)
+        session_state_manager.save_state(session_state)
+        
         yield notebook.render(mode="stopped"), notebook.data, messages
+
+
+def run_interactive_notebook(client, model, messages, sbx, stop_event=None, tools=None):
+    """Backward compatibility wrapper for the new session state system"""
+    logger.warning("Using legacy run_interactive_notebook - this should be replaced with session state version")
+    
+    # Create a temporary session for backward compatibility
+    import uuid
+    temp_session_id = str(uuid.uuid4())[:8]
+    session_manager = SessionStateManager(temp_session_id)
+    
+    # Create basic session state
+    session_state = session_manager.create_initial_state(
+        hardware_config={"gpu_type": "unknown", "cpu_cores": 2, "memory_gb": 8, "timeout_sec": 300},
+        api_config={"model_name": model, "provider_type": "unknown"},
+        environment={"variables": "", "files_uploaded": []},
+        system_prompt=messages[0].get("content", "") if messages and messages[0].get("role") == "system" else ""
+    )
+    
+    # Initialize conversation history with provided messages
+    session_state["conversation_history"] = messages
+    
+    # Use the new session-based function
+    yield from run_interactive_notebook_with_session_state(
+        client, model, session_manager, session_state, sbx, stop_event, tools
+    )
