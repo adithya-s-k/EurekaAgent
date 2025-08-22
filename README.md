@@ -2,6 +2,8 @@
 
 An AI-powered research automation system that can execute Python code, analyze data, and generate insights through an interactive Jupyter-like interface.
 
+<img width="1936" height="855" alt="Screenshot 2025-08-22 at 11 45 12 PM" src="https://github.com/user-attachments/assets/8d4ea793-4027-4aa3-8d6f-cbebbbd6e0c2" />
+
 ## 🎯 What it does
 
 Eureka Agent automates research workflows by:
@@ -148,4 +150,4 @@ This project is a fork of [Jupyter Agent 2](https://huggingface.co/spaces/lvwerr
 
 ## 📄 License
 
-See LICENSE file for details.
+See [LICENSE](./LICENSE) file for details.
