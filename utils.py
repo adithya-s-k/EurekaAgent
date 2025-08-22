@@ -590,9 +590,10 @@ def run_interactive_notebook_with_session_state(client, model, session_state_man
         logger.info(f"Starting turn {turns}/{MAX_TURNS}")
         
         try:
-            # Inference client call - might fail
+            # Refresh messages from session state before API call
+            messages = session_state_manager.get_conversation_history(session_state)
             logger.debug(f"Making API call to {model} with {len(messages)} messages")
-            
+
             # Prepare request data for logging
             request_data = {
                 "messages": clean_messages_for_api(messages),
@@ -704,45 +705,27 @@ An error occurred while communicating with the AI service:
         else:
             logger.debug("Skipping empty assistant response")
 
-        # Handle tool calls and add assistant message to both messages list and session state
+        # Handle tool calls and add assistant message to session state only
         if tool_calls:
             logger.info(f"Processing {len(tool_calls)} tool calls on turn {turns}")
-            # Add assistant message with ALL tool calls to messages history (once)
-            assistant_message = {
-                "role": "assistant",
-                "content": full_response,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    } for tc in tool_calls
-                ],
-            }
-            messages.append(assistant_message)
-            
-            # Also add to session state
+            # Add assistant message to session state (messages will be derived from this)
             session_state_manager.add_message(
                 session_state, "assistant", full_response,
                 tool_calls=[{
                     "id": tc.id,
-                    "type": "function", 
+                    "type": "function",
                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}
                 } for tc in tool_calls],
                 metadata={"turn": turns, "type": "thinking"}
             )
-            logger.debug(f"Added assistant message with {len(tool_calls)} tool calls to history and session state")
+            logger.debug(f"Added assistant message with {len(tool_calls)} tool calls to session state")
         elif full_response.strip():
             # If no tool calls but we have content, add regular assistant message
-            messages.append({"role": "assistant", "content": full_response})
             session_state_manager.add_message(
                 session_state, "assistant", full_response,
                 metadata={"turn": turns, "type": "thinking"}
             )
-            logger.debug("Added regular assistant message to history and session state")
+            logger.debug("Added regular assistant message to session state")
         
         for i, tool_call in enumerate(tool_calls):
             logger.debug(f"Processing tool call {i+1}/{len(tool_calls)}: {tool_call.function.name}")
@@ -852,17 +835,8 @@ An error occurred while executing the code in the sandbox:
                 raw_execution = notebook.parse_exec_result_nb(execution)
                 
                 logger.debug(f"Tool response: {len(tool_response_content)} chars content, {len(raw_execution)} raw outputs")
-                
-                # Add tool response to messages and session state
-                tool_message = {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": tool_response_content,
-                    "raw_execution": raw_execution
-                }
-                messages.append(tool_message)
-                
-                # Add to session state with full context
+
+                # Add tool response to session state only
                 session_state_manager.add_message(
                     session_state, "tool", tool_response_content,
                     tool_call_id=tool_call.id, raw_execution=raw_execution,
@@ -893,14 +867,7 @@ An error occurred while executing the code in the sandbox:
                     # Add search results to notebook
                     notebook.add_markdown(search_results, "assistant")
                     
-                    # Add tool response to messages and session state
-                    tool_message = {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": search_results
-                    }
-                    messages.append(tool_message)
-                    
+                    # Add tool response to session state only
                     session_state_manager.add_message(
                         session_state, "tool", search_results,
                         tool_call_id=tool_call.id,
@@ -921,14 +888,7 @@ An error occurred while executing the code in the sandbox:
                     # Add error to notebook
                     notebook.add_markdown(error_message, "assistant")
                     
-                    # Add error response to messages and session state
-                    tool_message = {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": error_message
-                    }
-                    messages.append(tool_message)
-                    
+                    # Add error response to session state only
                     session_state_manager.add_message(
                         session_state, "tool", error_message,
                         tool_call_id=tool_call.id,
@@ -942,21 +902,17 @@ An error occurred while executing the code in the sandbox:
             if len(full_response.strip())==0:
                 logger.error("Assistant provided no content and no tool calls")
                 notebook.add_error(f"No tool call and empty assistant response:\n{response.model_dump_json(indent=2)}")
-            
+
             # Only add the final assistant message if we didn't already add it above
             # (in the elif full_response.strip() block)
             if full_response.strip():
-                # Check if we already added this message above
-                if not any(msg.get("role") == "assistant" and msg.get("content") == full_response 
-                          for msg in messages[-3:]):  # Check recent messages
-                    messages.append({"role": "assistant", "content": full_response})
-                    session_state_manager.add_message(
-                        session_state, "assistant", full_response,
-                        metadata={"turn": turns, "type": "final_response"}
-                    )
-                    logger.debug("Added final assistant response to history and session state")
-                else:
-                    logger.debug("Assistant message already added to history, skipping duplicate")
+                # Since we're now only using session state, we can safely add the message
+                # The session state manager will handle any deduplication if needed
+                session_state_manager.add_message(
+                    session_state, "assistant", full_response,
+                    metadata={"turn": turns, "type": "final_response"}
+                )
+                logger.debug("Added final assistant response to session state")
             
             done = True
             

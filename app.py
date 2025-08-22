@@ -1461,22 +1461,21 @@ with gr.Blocks() as demo:
             outputs=[load_status]
         )
 
-    # Periodic status update
-    # demo.load(
-    #     fn=get_execution_status,
-    #     inputs=None,
-    #     outputs=[status_display],
-    #     every=2,  # Update every 2 seconds
-    #     show_progress="hidden"
-    # )
+    # Periodic status update using timer
+    status_timer = gr.Timer(2.0)  # Update every 2 seconds
+    status_timer.tick(
+        fn=get_execution_status,
+        outputs=[status_display],
+        show_progress="hidden"
+    )
 
-    # # Update button visibility periodically
-    # demo.load(
-    #     fn=update_sandbox_button_visibility,
-    #     outputs=[shutdown_btn],
-    #     every=3,  # Check every 3 seconds
-    #     show_progress="hidden"
-    # )
+    # Update button visibility periodically
+    button_timer = gr.Timer(3.0)  # Check every 3 seconds
+    button_timer.tick(
+        fn=update_sandbox_button_visibility,
+        outputs=[shutdown_btn],
+        show_progress="hidden"
+    )
 
     demo.load(
         fn=None,

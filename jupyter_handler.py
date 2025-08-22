@@ -59,6 +59,85 @@ assistant_final_answer_template = """<div class="alert alert-block alert-warning
 </div>
 """
 
+web_search_template = """
+<details style="margin-bottom: 16px; border: 1px solid #e1e5e9; border-radius: 6px; background-color: #f8f9fa;">
+  <summary style="display: flex; align-items: center; cursor: pointer; padding: 12px; background-color: #e3f2fd; border-radius: 6px 6px 0 0; margin: 0;">
+    <h4 style="color: #1976d2; margin: 0; margin-right: 8px; font-size: 14px; font-weight: 600;">🔍 Web Search Results</h4>
+    <span class="search-arrow" style="margin-left: auto; font-size: 12px; transition: transform 0.2s;">▼</span>
+  </summary>
+  <div style="padding: 16px; background-color: #ffffff;">
+    <div style="margin-bottom: 12px; padding: 8px; background-color: #f0f7ff; border-radius: 4px; border-left: 3px solid #2196f3;">
+      <strong style="color: #1976d2;">Query:</strong> <em>{query}</em>
+    </div>
+    
+    {quick_answer}
+    
+    <div style="margin-top: 16px;">
+      <h5 style="color: #424242; font-size: 13px; margin-bottom: 12px; font-weight: 600;">📚 Sources:</h5>
+      {sources}
+    </div>
+  </div>
+</details>
+
+<style>
+details[open] > summary .search-arrow {{
+  transform: rotate(180deg);
+}}
+details > summary {{
+  list-style: none;
+}}
+details > summary::-webkit-details-marker {{
+  display: none;
+}}
+.source-item {{
+  margin-bottom: 8px;
+  padding: 8px;
+  background-color: #f9f9f9;
+  border-radius: 4px;
+  border-left: 2px solid #4caf50;
+}}
+.source-title {{
+  font-weight: 600;
+  color: #2e7d32;
+  font-size: 13px;
+  margin-bottom: 4px;
+}}
+.source-url {{
+  color: #666;
+  font-size: 11px;
+  text-decoration: none;
+  word-break: break-all;
+}}
+.source-url:hover {{
+  color: #1976d2;
+  text-decoration: underline;
+}}
+.relevance-score {{
+  display: inline-block;
+  background-color: #e8f5e8;
+  color: #2e7d32;
+  padding: 2px 6px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 600;
+  margin-left: 8px;
+}}
+.quick-answer {{
+  background-color: #fff8e1;
+  border-left: 3px solid #ffc107;
+  padding: 12px;
+  margin-bottom: 16px;
+  border-radius: 4px;
+}}
+.quick-answer-title {{
+  color: #f57c00;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 6px;
+}}
+</style>
+"""
+
 header_message = """<div style="text-align: center; padding: 24px 16px; margin-bottom: 24px;">
   <h1 style="color: #1e3a8a; font-size: 48px; font-weight: 700; margin: 0 0 8px 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
     🔬 Eureka Agent
@@ -580,16 +659,19 @@ class JupyterNotebook:
         logger.debug(f"Adding markdown cell with role '{role}' ({len(markdown)} chars)")
         if role == "system":
             system_message = markdown if markdown else "default"
-            markdown_formatted = system_template.format(system_message.replace('\n', '<br>'))
+            clean_message = self._clean_markdown_formatting(system_message)
+            markdown_formatted = system_template.format(clean_message)
         elif role == "user":
-            markdown_formatted = user_template.format(markdown.replace('\n', '<br>'))
+            clean_message = self._clean_markdown_formatting(markdown)
+            markdown_formatted = user_template.format(clean_message)
         elif role == "assistant":
-            markdown_formatted = assistant_thinking_template.format(markdown)
+            clean_message = self._clean_markdown_formatting(markdown)
+            markdown_formatted = assistant_thinking_template.format(clean_message)
             markdown_formatted = markdown_formatted.replace('<think>', '&lt;think&gt;')
             markdown_formatted = markdown_formatted.replace('</think>', '&lt;/think&gt;')
         else:
             # Default case for raw markdown
-            markdown_formatted = markdown
+            markdown_formatted = self._clean_markdown_formatting(markdown)
 
         self.data["cells"].append({
             "cell_type": "markdown",
@@ -615,6 +697,80 @@ class JupyterNotebook:
             "metadata": {},
             "source": assistant_final_answer_template.format(answer)
             })
+
+    def add_web_search_result(self, query, quick_answer=None, sources=None):
+        """Add a web search result cell with dropdown UI"""
+        logger.info(f"Adding web search result for query: {query}")
+        
+        # Format quick answer section
+        quick_answer_html = ""
+        if quick_answer:
+            # Clean up markdown formatting in quick answer
+            clean_answer = self._clean_markdown_formatting(quick_answer)
+            quick_answer_html = f"""
+            <div class="quick-answer">
+                <div class="quick-answer-title">💡 Quick Answer:</div>
+                <div>{clean_answer}</div>
+            </div>
+            """
+        
+        # Format sources section
+        sources_html = ""
+        if sources:
+            source_items = []
+            for i, source in enumerate(sources, 1):
+                title = self._clean_markdown_formatting(source.get('title', f'Source {i}'))
+                url = source.get('url', '#')
+                relevance = source.get('relevance', 0.0)
+                
+                source_item = f"""
+                <div class="source-item">
+                    <div class="source-title">{i}. {title}
+                        <span class="relevance-score">Relevance: {relevance:.2f}</span>
+                    </div>
+                    <a href="{url}" target="_blank" class="source-url">{url}</a>
+                </div>
+                """
+                source_items.append(source_item)
+            sources_html = "".join(source_items)
+        
+        # Format the complete web search result
+        web_search_html = web_search_template.format(
+            query=self._clean_markdown_formatting(query),
+            quick_answer=quick_answer_html,
+            sources=sources_html
+        )
+        
+        self.data["cells"].append({
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": web_search_html
+        })
+
+    def _clean_markdown_formatting(self, text):
+        """Clean up markdown formatting issues like excessive ** characters"""
+        if not text:
+            return ""
+        
+        # Replace multiple consecutive asterisks with proper formatting
+        import re
+        
+        # Handle bold text: **text** -> <strong>text</strong>
+        text = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', text)
+        
+        # Handle italic text: *text* -> <em>text</em>
+        text = re.sub(r'(?<!\*)\*(?!\*)([^*]+)\*(?!\*)', r'<em>\1</em>', text)
+        
+        # Clean up any remaining multiple asterisks
+        text = re.sub(r'\*{3,}', '**', text)
+        
+        # Handle line breaks
+        text = text.replace('\n', '<br>')
+        
+        # Handle links [text](url) -> <a href="url">text</a>
+        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" target="_blank">\1</a>', text)
+        
+        return text
 
     def parse_exec_result_nb(self, execution):
         """Convert an E2B Execution object to Jupyter notebook cell output format"""
@@ -792,13 +948,33 @@ def main():
     mock_messages = [
         {"role": "system", "content": "You are a helpful AI assistant that can write and execute Python code."},
         {"role": "user", "content": "Can you help me create a simple plot of a sine wave?"},
-        {"role": "assistant", "content": "I'll help you create a sine wave plot using matplotlib. Let me write the code for that."},
+        {"role": "assistant", "content": "I'll help you create a sine wave plot using matplotlib. **Let me search** for the *best practices* first."},
         {"role": "assistant", "tool_calls": [{"id": "call_1", "function": {"name": "add_and_execute_jupyter_code_cell", "arguments": '{"code": "import numpy as np\\nimport matplotlib.pyplot as plt\\n\\n# Create x values\\nx = np.linspace(0, 4*np.pi, 100)\\ny = np.sin(x)\\n\\n# Create the plot\\nplt.figure(figsize=(10, 6))\\nplt.plot(x, y, \'b-\', linewidth=2)\\nplt.title(\'Sine Wave\')\\nplt.xlabel(\'x\')\\nplt.ylabel(\'sin(x)\')\\nplt.grid(True)\\nplt.show()"}'}}]},
         {"role": "tool", "tool_call_id": "call_1", "raw_execution": [{"output_type": "stream", "name": "stdout", "text": "Plot created successfully!"}]}
     ]
     
     # Create notebook
     notebook = JupyterNotebook(mock_messages)
+    
+    # Add a web search result example to test the new UI
+    mock_sources = [
+        {
+            "title": "**Matplotlib** Tutorial - Creating **Beautiful** Plots",
+            "url": "https://matplotlib.org/stable/tutorials/introductory/pyplot.html",
+            "relevance": 0.85
+        },
+        {
+            "title": "NumPy *Sine Wave* Generation **Best Practices**",
+            "url": "https://numpy.org/doc/stable/reference/generated/numpy.sin.html",
+            "relevance": 0.72
+        }
+    ]
+    
+    notebook.add_web_search_result(
+        query="**matplotlib** *sine wave* tutorial **best practices**",
+        quick_answer="To create a **sine wave plot** with *matplotlib*, use `numpy.linspace()` to generate **x values** and `numpy.sin()` for *y values*. **Configure** the plot with *appropriate* labels and **styling** for better visualization.",
+        sources=mock_sources
+    )
     
     # Add a timeout countdown (simulating a sandbox that started 2 minutes ago with 5 minute timeout)
     start_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=2)
@@ -812,7 +988,7 @@ def main():
         f.write(html_output)
     
     print("Mock notebook saved as 'mock_notebook.html'")
-    print("Open it in your browser to see the styling changes.")
+    print("Open it in your browser to see the improved web search UI and markdown formatting.")
 
 def create_notebook_from_session_state(session_state):
     """Helper function to create JupyterNotebook from session state"""
