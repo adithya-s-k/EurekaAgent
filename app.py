@@ -1496,69 +1496,70 @@ with gr.Blocks() as demo:
 
     
     with gr.Accordion("Hardware Configuration ⚙️", open=False):
-        
-        env_vars = gr.Textbox(
-                label="Environment Variables",
-                placeholder="Enter environment variables (one per line):\nAPI_KEY=your_key_here\nDATA_PATH=/path/to/data\nDEBUG=true",
-                lines=5,
-                info="Add custom environment variables for the sandbox. Format: KEY=value (one per line)"
-            )
-            
-        env_info = gr.Markdown("""
-            **Environment Variables Info:**
-            - Variables will be available in the sandbox environment
-            - Use KEY=value format, one per line
-            - Common examples: API keys, data paths, configuration flags
-            - Variables are session-specific and not persisted between sessions
-            
-            ⚠️ **Security**: Avoid sensitive credentials in shared environments
-            """)
-        
         with gr.Row():
-            gpu_type = gr.Dropdown(
-                choices=GPU_OPTIONS,
-                value="cpu",
-                label="GPU Type",
-                info="Select hardware acceleration"
-            )
-            cpu_cores = gr.Slider(
-                minimum=0.25,
-                maximum=16,
-                value=2.0,
-                step=0.25,
-                label="CPU Cores",
-                info="Number of CPU cores"
-            )
-        with gr.Row():
-            memory_gb = gr.Slider(
-                minimum=0.5,
-                maximum=64,
-                value=8.0,
-                step=0.5,
-                label="Memory (GB)",
-                info="RAM allocation"
-            )
-            timeout_sec = gr.Slider(
-                minimum=60,
-                maximum=1800,
-                value=300,
-                step=60,
-                label="Timeout (seconds)",
-                info="Maximum execution time"
-            )
-        
-        hardware_info = gr.Markdown("""
-        **Hardware Options:**
-        - **CPU Only**: Free, good for basic tasks
-        - **T4**: Low-cost GPU, good for small models
-        - **L4**: Mid-range GPU, better performance
-        - **A100 40/80GB**: High-end GPU for large models
-        - **H100**: Latest flagship GPU for maximum performance
-        
-        ⚠️ **Note**: GPU instances cost more. Choose based on your workload.
-        """)
-    
-        # with gr.Accordion("Environment Variables 🔧", open=False):
+            with gr.Column():
+                env_vars = gr.Textbox(
+                        label="Environment Variables",
+                        placeholder="Enter environment variables (one per line):\nAPI_KEY=your_key_here\nDATA_PATH=/path/to/data\nDEBUG=true",
+                        lines=5,
+                        info="Add custom environment variables for the sandbox. Format: KEY=value (one per line)"
+                    )
+                    
+                env_info = gr.Markdown("""
+                    **Environment Variables Info:**
+                    - Variables will be available in the sandbox environment
+                    - Use KEY=value format, one per line
+                    - Common examples: API keys, data paths, configuration flags
+                    - Variables are session-specific and not persisted between sessions
+                    
+                    ⚠️ **Security**: Avoid sensitive credentials in shared environments
+                    """)
+            with gr.Column():
+                with gr.Row():
+                    gpu_type = gr.Dropdown(
+                        choices=GPU_OPTIONS,
+                        value="cpu",
+                        label="GPU Type",
+                        info="Select hardware acceleration"
+                    )
+                    cpu_cores = gr.Slider(
+                        minimum=0.25,
+                        maximum=16,
+                        value=2.0,
+                        step=0.25,
+                        label="CPU Cores",
+                        info="Number of CPU cores"
+                    )
+                with gr.Row():
+                    memory_gb = gr.Slider(
+                        minimum=0.5,
+                        maximum=64,
+                        value=8.0,
+                        step=0.5,
+                        label="Memory (GB)",
+                        info="RAM allocation"
+                    )
+                    timeout_sec = gr.Slider(
+                        minimum=60,
+                        maximum=1800,
+                        value=300,
+                        step=60,
+                        label="Timeout (seconds)",
+                        info="Maximum execution time"
+                    )
+                
+                hardware_info = gr.Markdown("""
+                **Hardware Options:**
+                - **CPU Only**: Free, good for basic tasks
+                - **T4**: Low-cost GPU, good for small models
+                - **L4**: Mid-range GPU, better performance
+                - **A100 40/80GB**: High-end GPU for large models
+                - **H100**: Latest flagship GPU for maximum performance
+                
+                ⚠️ **Note**: GPU instances cost more. Choose based on your workload.
+                """)
+            
+                # with gr.Accordion("Environment Variables 🔧", open=False):
             
             
     with gr.Row():
