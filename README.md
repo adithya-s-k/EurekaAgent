@@ -34,7 +34,7 @@ Eureka Agent automates research workflows by:
 1. Clone the repository:
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/adithya-s-k/EurekaAgent
 cd EurekaAgent
 ```
 

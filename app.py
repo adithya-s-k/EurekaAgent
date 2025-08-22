@@ -813,7 +813,7 @@ You can either:
     logger.debug(f"Session {session_id} ready with {len(message_history)} messages")
 
     # Determine which tools to use based on web search toggle
-    from EurekaAgent.jupyter_agent import TOOLS
+    from jupyter_agent import TOOLS
     if enable_web_search:
         # Check if Tavily API key is available
         tavily_key = os.environ.get("TAVILY_API_KEY") or tavily_api_key
@@ -831,7 +831,7 @@ You can either:
     
     # Import Phoenix session context if available
     try:
-        from EurekaAgent.jupyter_agent import create_phoenix_session_context
+        from jupyter_agent import create_phoenix_session_context
         phoenix_available = True
     except ImportError:
         phoenix_available = False
