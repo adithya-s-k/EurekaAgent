@@ -7,6 +7,15 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from tavily import TavilyClient
 
+# Phoenix tracing imports
+try:
+    from openinference.instrumentation import using_session
+    PHOENIX_AVAILABLE = True
+    print("Phoenix session tracking imports successful")
+except ImportError:
+    PHOENIX_AVAILABLE = False
+    print("Phoenix session tracking not available - missing openinference packages")
+
 # Configure logging for utils module
 logger = logging.getLogger(__name__)
 
@@ -55,6 +64,35 @@ TOOLS = [
 # TOOLS = TOOLS[:1]
 
 MAX_TURNS = 20
+
+
+def create_phoenix_session_context(session_id: str, user_id: str = None, metadata: Dict = None):
+    """
+    Create a Phoenix session context for tracing LLM interactions.
+    
+    Args:
+        session_id: Unique identifier for the session
+        user_id: Optional user identifier
+        metadata: Additional metadata to include in traces
+        
+    Returns:
+        Context manager for Phoenix session tracking
+    """
+    if not PHOENIX_AVAILABLE:
+        # Return a no-op context manager if Phoenix is not available
+        from contextlib import nullcontext
+        return nullcontext()
+    
+    try:
+        # Use using_session for proper session grouping in Phoenix
+        # This ensures all LLM calls within this context are grouped under the same session
+        logger.debug(f"Creating Phoenix session context for session_id: {session_id}")
+        return using_session(session_id)
+    except Exception as e:
+        logger.warning(f"Failed to create Phoenix session context for {session_id}: {e}")
+        # Fallback to no-op context if Phoenix session creation fails
+        from contextlib import nullcontext
+        return nullcontext()
 
 
 class SessionStateManager:
@@ -124,11 +162,11 @@ class SessionStateManager:
             }
         }
         
-        logger.info(f"Created initial session state for {self.session_id}")
+        logger.info("Created initial session state for %s", self.session_id)
         return initial_state
     
     def load_state(self) -> Optional[Dict]:
-        """Load session state from file"""
+        """Load session state from file with improved error handling"""
         if not self.state_file.exists():
             logger.info(f"No existing session state found for {self.session_id}")
             return None
@@ -138,12 +176,22 @@ class SessionStateManager:
                 state = json.load(f)
             logger.info(f"Loaded session state for {self.session_id} with {len(state.get('conversation_history', []))} messages")
             return state
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON corruption in session state for {self.session_id}: {str(e)}")
+            logger.info(f"Creating backup of corrupted file: {self.state_file}.corrupted")
+            try:
+                import shutil
+                shutil.copy2(self.state_file, str(self.state_file) + ".corrupted")
+                logger.info(f"Backup created successfully")
+            except Exception as backup_error:
+                logger.warning(f"Failed to create backup: {backup_error}")
+            return None
         except Exception as e:
             logger.error(f"Failed to load session state for {self.session_id}: {str(e)}")
             return None
     
     def save_state(self, state: Dict) -> bool:
-        """Save session state to file"""
+        """Save session state to file with improved error handling"""
         try:
             # Update last_updated timestamp
             state["last_updated"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -157,14 +205,58 @@ class SessionStateManager:
             state["session_stats"]["session_duration_seconds"] = int((current_time - created_at).total_seconds())
             state["session_stats"]["total_messages"] = len(state.get("conversation_history", []))
             
-            with open(self.state_file, 'w', encoding='utf-8') as f:
+            # Validate JSON serializability before writing
+            try:
+                json.dumps(state, ensure_ascii=False)
+            except (TypeError, ValueError) as e:
+                logger.error(f"State contains non-serializable data: {e}")
+                logger.info("Attempting to clean non-serializable data...")
+                state = self._clean_non_serializable_data(state)
+            
+            # Write to temporary file first, then rename for atomic operation
+            temp_file = self.state_file.with_suffix('.tmp')
+            with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(state, f, indent=2, ensure_ascii=False)
+            
+            # Atomic rename
+            temp_file.replace(self.state_file)
             
             logger.debug(f"Saved session state for {self.session_id} ({len(json.dumps(state))} characters)")
             return True
         except Exception as e:
             logger.error(f"Failed to save session state for {self.session_id}: {str(e)}")
+            # Clean up temp file if it exists
+            temp_file = self.state_file.with_suffix('.tmp')
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except Exception:
+                    pass
             return False
+    
+    def _clean_non_serializable_data(self, obj):
+        """Recursively clean non-serializable data from objects"""
+        if isinstance(obj, dict):
+            cleaned = {}
+            for key, value in obj.items():
+                try:
+                    json.dumps(value)
+                    cleaned[key] = self._clean_non_serializable_data(value)
+                except (TypeError, ValueError):
+                    logger.warning(f"Removing non-serializable field: {key}")
+                    cleaned[key] = f"<non-serializable: {type(value).__name__}>"
+            return cleaned
+        elif isinstance(obj, list):
+            cleaned = []
+            for item in obj:
+                try:
+                    json.dumps(item)
+                    cleaned.append(self._clean_non_serializable_data(item))
+                except (TypeError, ValueError):
+                    cleaned.append(f"<non-serializable: {type(item).__name__}>")
+            return cleaned
+        else:
+            return obj
     
     def log_llm_interaction(self, state: Dict, request_data: Dict, response_data: Dict, 
                            model: str, turn: int) -> None:
@@ -193,12 +285,42 @@ class SessionStateManager:
             state["llm_interactions"] = []
         state["llm_interactions"].append(interaction)
         
+        # Log Phoenix session information for easy debugging
         logger.debug(f"Logged LLM interaction for turn {turn} in session {self.session_id}")
+        logger.debug(f"Phoenix session tracking: session_id={self.session_id}, turn={turn}, model={model}")
+        
+        # Log usage information if available for monitoring
+        usage = response_data.get("usage")
+        if usage:
+            logger.info(f"Session {self.session_id} turn {turn}: "
+                       f"prompt_tokens={usage.get('prompt_tokens', 0)}, "
+                       f"completion_tokens={usage.get('completion_tokens', 0)}, "
+                       f"total_tokens={usage.get('total_tokens', 0)}")
     
     def log_tool_execution(self, state: Dict, tool_call_id: str, tool_name: str, 
                           tool_args: Dict, result: str, execution_data: Any = None) -> None:
         """Log tool execution with full details"""
         timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        
+        # Safely serialize execution_data to prevent JSON corruption
+        safe_execution_data = None
+        if execution_data is not None:
+            try:
+                # Convert execution_data to a safe, serializable format
+                if hasattr(execution_data, '__dict__'):
+                    safe_execution_data = {
+                        "type": type(execution_data).__name__,
+                        "error": str(execution_data.error) if hasattr(execution_data, 'error') and execution_data.error else None,
+                        "has_results": hasattr(execution_data, 'results') and bool(execution_data.results),
+                        "has_stdout": hasattr(execution_data, 'logs') and hasattr(execution_data.logs, 'stdout') and bool(execution_data.logs.stdout),
+                        "has_stderr": hasattr(execution_data, 'logs') and hasattr(execution_data.logs, 'stderr') and bool(execution_data.logs.stderr)
+                    }
+                else:
+                    # For simple types, convert to string safely
+                    safe_execution_data = str(execution_data)[:200]  # Limit length
+            except Exception as e:
+                logger.warning(f"Failed to serialize execution_data for {tool_call_id}: {e}")
+                safe_execution_data = {"serialization_error": str(e)}
         
         tool_execution = {
             "timestamp": timestamp,
@@ -207,7 +329,7 @@ class SessionStateManager:
             "arguments": tool_args,
             "result_summary": result[:500] + "..." if len(result) > 500 else result,
             "result_length": len(result),
-            "execution_data": execution_data,
+            "execution_data": safe_execution_data,
             "success": execution_data is None or (hasattr(execution_data, 'error') and execution_data.error is None) if execution_data else True
         }
         
@@ -256,6 +378,17 @@ class SessionStateManager:
             if key in state["execution_state"]:
                 state["execution_state"][key] = value
                 logger.debug(f"Updated execution state {key}={value} for session {self.session_id}")
+                
+        # Try to sync with global EXECUTION_STATES for UI consistency (if available)
+        try:
+            import sys
+            if 'app' in sys.modules:
+                execution_states = getattr(sys.modules['app'], 'EXECUTION_STATES', None)
+                if execution_states and self.session_id in execution_states:
+                    for key, value in kwargs.items():
+                        execution_states[self.session_id][key] = value
+        except (ImportError, AttributeError):
+            pass  # Ignore if we can't sync with global state
     
     def update_notebook_data(self, state: Dict, notebook_data: Dict) -> None:
         """Update notebook data in session state"""
@@ -546,7 +679,7 @@ def run_interactive_notebook_with_session_state(client, model, session_state_man
     notebook = JupyterNotebook(messages)
     
     # Update execution state
-    session_state_manager.update_execution_state(session_state, is_running=True, sandbox_active=True)
+    session_state_manager.update_execution_state(session_state, is_running=True, sandbox_active=True, current_phase="initializing")
     
     # Use provided tools or default to all tools
     if tools is None:
@@ -590,6 +723,9 @@ def run_interactive_notebook_with_session_state(client, model, session_state_man
         logger.info(f"Starting turn {turns}/{MAX_TURNS}")
         
         try:
+            # Update phase to generating
+            session_state_manager.update_execution_state(session_state, current_phase="generating")
+            
             # Refresh messages from session state before API call
             messages = session_state_manager.get_conversation_history(session_state)
             logger.debug(f"Making API call to {model} with {len(messages)} messages")
@@ -602,8 +738,34 @@ def run_interactive_notebook_with_session_state(client, model, session_state_man
                 "tool_choice": "auto"
             }
             
-            response = client.chat.completions.create(**request_data)
-            logger.debug("API call successful")
+            # Prepare session metadata for Phoenix tracing
+            session_metadata = {
+                "turn": turns,
+                "max_turns": MAX_TURNS,
+                "model": model,
+                "tools_count": len(tools),
+                "messages_count": len(messages),
+                "current_phase": "generating"
+            }
+            
+            # Add hardware config if available
+            if "hardware_config" in session_state:
+                hw_config = session_state["hardware_config"]
+                session_metadata.update({
+                    "gpu_type": hw_config.get("gpu_type", "unknown"),
+                    "cpu_cores": hw_config.get("cpu_cores", "unknown"),
+                    "memory_gb": hw_config.get("memory_gb", "unknown")
+                })
+            
+            # Wrap OpenAI API call with Phoenix session context for proper grouping
+            with create_phoenix_session_context(
+                session_id=session_state_manager.session_id,
+                user_id=None,  # Could be extracted from request context if available
+                metadata=session_metadata
+            ):
+                logger.debug(f"Making OpenAI API call with Phoenix session context: {session_state_manager.session_id}")
+                response = client.chat.completions.create(**request_data)
+                logger.debug("API call successful within Phoenix session context")
             
             # Log the complete LLM interaction
             session_state_manager.log_llm_interaction(
@@ -731,6 +893,9 @@ An error occurred while communicating with the AI service:
             logger.debug(f"Processing tool call {i+1}/{len(tool_calls)}: {tool_call.function.name}")
 
             if tool_call.function.name == "add_and_execute_jupyter_code_cell":
+                # Update phase to executing code
+                session_state_manager.update_execution_state(session_state, current_phase="executing_code")
+                
                 logger.debug(f"Processing code execution tool call: {tool_call.id}")
                 tool_args = json.loads(tool_call.function.arguments)
                 code = tool_args["code"]
@@ -843,6 +1008,9 @@ An error occurred while executing the code in the sandbox:
                     metadata={"turn": turns, "execution_successful": not previous_execution_had_error}
                 )
             elif tool_call.function.name == "tavily_search":
+                # Update phase to searching
+                session_state_manager.update_execution_state(session_state, current_phase="searching")
+                
                 logger.debug(f"Processing search tool call: {tool_call.id}")
                 tool_args = json.loads(tool_call.function.arguments)
                 query = tool_args["query"]

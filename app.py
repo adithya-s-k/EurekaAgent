@@ -299,7 +299,7 @@ def create_progress_notification(message, progress_percent=None):
 
 
 def initialize_phoenix_tracing():
-    """Initialize Phoenix tracing with proper error handling"""
+    """Initialize Phoenix tracing with proper error handling and session support"""
     try:
         from phoenix.otel import register
         
@@ -314,7 +314,7 @@ def initialize_phoenix_tracing():
             logger.info("Phoenix collector endpoint not found, skipping Phoenix tracing initialization")
             return None
             
-        logger.info("Initializing Phoenix tracing...")
+        logger.info("Initializing Phoenix tracing with session support...")
         
         # Set required environment variables
         os.environ["PHOENIX_API_KEY"] = phoenix_api_key
@@ -322,15 +322,30 @@ def initialize_phoenix_tracing():
         os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = f"api_key={phoenix_api_key}"
         os.environ["PHOENIX_CLIENT_HEADERS"] = f"api_key={phoenix_api_key}"
 
-
-        # Configure the Phoenix tracer with reduced auto-instrumentation to avoid conflicts
+        # Configure the Phoenix tracer with OpenAI instrumentation enabled
         tracer_provider = register(
-            project_name="jupyter-agent-2",
-            auto_instrument=True,  # Disable auto-instrument to prevent OpenAI client conflicts
+            project_name="eureka-agent",
+            auto_instrument=True,  # Keep auto-instrument enabled for OpenAI tracing
             set_global_tracer_provider=True
         )
         
-        logger.info("Phoenix tracing initialized successfully")
+        # Additional instrumentation setup for session tracking
+        try:
+            from openinference.instrumentation.openai import OpenAIInstrumentor
+            
+            # Ensure OpenAI instrumentation is properly configured
+            if not OpenAIInstrumentor().is_instrumented_by_opentelemetry:
+                OpenAIInstrumentor().instrument()
+                logger.info("OpenAI instrumentation configured for Phoenix session tracking")
+            else:
+                logger.info("OpenAI instrumentation already active")
+                
+        except ImportError:
+            logger.warning("OpenAI instrumentation not available - session grouping may not work optimally")
+        except Exception as e:
+            logger.warning(f"Failed to configure OpenAI instrumentation: {str(e)}")
+        
+        logger.info("Phoenix tracing initialized successfully with session support")
         return tracer_provider
         
     except ImportError:
@@ -426,7 +441,7 @@ def initialize_openai_client():
             logger.info("Testing client connection...")
             try:
                 # Simple test to verify the client works
-                test_response = client.chat.completions.create(
+                _ = client.chat.completions.create(
                     model=model_name,
                     messages=[{"role": "user", "content": "Hello"}],
                     max_tokens=5
@@ -480,6 +495,20 @@ def execute_jupyter_agent(
     logger.info(f"Starting execution for session {session_id}")
     logger.info(f"Hardware config: GPU={gpu_type}, CPU={cpu_cores}, Memory={memory_gb}GB, Timeout={timeout_sec}s")
     logger.info(f"User input length: {len(user_input)} characters")
+    
+    # Check if execution is already running for this session
+    if session_id in EXECUTION_STATES and EXECUTION_STATES[session_id].get("running", False):
+        error_message = "❌ Execution already in progress for this session. Please wait for it to complete or stop it first."
+        error_notification = create_notification_html(error_message, "warning")
+        
+        # Return current state without starting new execution
+        session_dir = os.path.join(TMP_DIR, session_id)
+        save_dir = os.path.join(session_dir, 'jupyter-agent.ipynb')
+        if os.path.exists(save_dir):
+            yield error_notification, message_history, save_dir
+        else:
+            yield error_notification, message_history, TMP_DIR + "jupyter-agent.ipynb"
+        return
     
     # Initialize session state manager
     session_manager = SessionStateManager(session_id, TMP_DIR)
@@ -576,7 +605,7 @@ You can either:
     
     # Initialize or reset stop event for this session
     STOP_EVENTS[session_id] = threading.Event()
-    EXECUTION_STATES[session_id] = {"running": True, "paused": False}
+    EXECUTION_STATES[session_id] = {"running": True, "paused": False, "current_phase": "initializing"}
 
     # Set up save directory early for notifications
     session_dir = os.path.join(TMP_DIR, request.session_hash)
@@ -698,15 +727,25 @@ You can either:
         
         # Add new user input if provided
         if user_input and user_input.strip():
-            # Check if this input was already added
-            if not (message_history and 
-                    message_history[-1].get("role") == "user" and 
-                    message_history[-1].get("content") == user_input):
+            # Check if this input was already added by comparing with the last message
+            last_message = message_history[-1] if message_history else None
+            should_add_input = True
+            
+            if last_message and last_message.get("role") == "user":
+                # If the last message is from user and has the same content, don't add duplicate
+                if last_message.get("content") == user_input:
+                    should_add_input = False
+                    logger.debug(f"User input already present in session {session_id}")
+            
+            if should_add_input:
                 session_manager.add_message(session_state, "user", user_input)
                 message_history = session_manager.get_conversation_history(session_state)
                 logger.info(f"Added new user input to existing session {session_id}")
-            else:
-                logger.debug(f"User input already present in session {session_id}")
+                
+                # Show notification that we're continuing the conversation
+                continue_message = "🔄 Continuing conversation with new input..."
+                continue_notification = create_progress_notification(continue_message)
+                yield continue_notification, message_history, save_dir
     else:
         # Create new session state
         logger.info(f"Initializing new session {session_id}")
@@ -789,28 +828,65 @@ You can either:
         logger.info(f"Web search disabled for session {session_id} - using code tool only")
 
     logger.info(f"Starting interactive notebook execution for session {session_id}")
+    
+    # Import Phoenix session context if available
     try:
-        for notebook_html, notebook_data, messages in run_interactive_notebook_with_session_state(
-            client, model_name, session_manager, session_state, sbx, STOP_EVENTS[session_id], selected_tools
-        ):
-            message_history = messages
-            logger.debug(f"Interactive notebook yield for session {session_id}")
-            # Update session state and yield with legacy notebook file for UI compatibility
-            session_manager.update_notebook_data(session_state, notebook_data)
-            session_manager.save_state(session_state)
+        from utils import create_phoenix_session_context
+        phoenix_available = True
+    except ImportError:
+        phoenix_available = False
+    
+    # Prepare session metadata for Phoenix tracing at the session level
+    if phoenix_available:
+        session_level_metadata = {
+            "agent_type": "eureka-agent",
+            "session_type": "jupyter_execution",
+            "gpu_type": gpu_type,
+            "cpu_cores": cpu_cores,
+            "memory_gb": memory_gb,
+            "timeout_sec": timeout_sec,
+            "web_search_enabled": enable_web_search,
+            "tools_available": len(selected_tools)
+        }
+        
+        # Add API provider info if available
+        if model_name:
+            session_level_metadata["model"] = model_name
             
-            # Create legacy notebook file for UI download compatibility
-            with open(save_dir, 'w', encoding='utf-8') as f:
-                json.dump(notebook_data, f, indent=2)
+        session_context = create_phoenix_session_context(
+            session_id=session_id,
+            user_id=None,  # Could add user identification if available
+            metadata=session_level_metadata
+        )
+    else:
+        from contextlib import nullcontext
+        session_context = nullcontext()
+    
+    # Wrap the entire execution in a Phoenix session context
+    with session_context:
+        logger.debug(f"Starting session-level Phoenix tracing for {session_id}")
+        try:
+            for notebook_html, notebook_data, messages in run_interactive_notebook_with_session_state(
+                client, model_name, session_manager, session_state, sbx, STOP_EVENTS[session_id], selected_tools
+            ):
+                message_history = messages
+                logger.debug(f"Interactive notebook yield for session {session_id}")
+                # Update session state and yield with legacy notebook file for UI compatibility
+                session_manager.update_notebook_data(session_state, notebook_data)
+                session_manager.save_state(session_state)
                 
-            yield notebook_html, message_history, save_dir
-            
-    except Exception as e:
-        logger.error(f"Error during interactive notebook execution for session {session_id}: {str(e)}")
-        # Save error state
-        session_manager.update_execution_state(session_state, is_running=False, last_execution_successful=False)
-        session_manager.save_state(session_state)
-        raise
+                # Create legacy notebook file for UI download compatibility
+                with open(save_dir, 'w', encoding='utf-8') as f:
+                    json.dump(notebook_data, f, indent=2)
+                    
+                yield notebook_html, message_history, save_dir
+                
+        except Exception as e:
+            logger.error(f"Error during interactive notebook execution for session {session_id}: {str(e)}")
+            # Save error state
+            session_manager.update_execution_state(session_state, is_running=False, last_execution_successful=False)
+            session_manager.save_state(session_state)
+            raise
     
     # Final save and cleanup
     try:
@@ -834,28 +910,23 @@ You can either:
         EXECUTION_STATES[session_id]["running"] = False
 
 def clear(msg_state, request: gr.Request):
+    """Clear notebook but keep session data (less destructive than shutdown)"""
     session_id = request.session_hash
-    logger.info(f"Clearing session {session_id}")
+    logger.info(f"Clearing notebook for session {session_id}")
     
-    if request.session_hash in SANDBOXES:
-        try:
-            logger.info(f"Killing Modal sandbox for session {session_id}")
-            SANDBOXES[request.session_hash].kill()
-            SANDBOXES.pop(request.session_hash)
-            logger.info(f"Successfully cleared sandbox for session {session_id}")
-        except Exception as e:
-            logger.error(f"Error clearing sandbox for session {session_id}: {str(e)}")
-    else:
-        logger.info(f"No sandbox found to clear for session {session_id}")
-
-    msg_state = []
-    logger.info(f"Reset message state for session {session_id}")
-    
-    # Clean up stop events and execution states
+    # Stop any running execution
     if session_id in STOP_EVENTS:
-        STOP_EVENTS.pop(session_id)
+        STOP_EVENTS[session_id].set()
+    
+    # Clear execution states but keep session data
     if session_id in EXECUTION_STATES:
-        EXECUTION_STATES.pop(session_id)
+        EXECUTION_STATES[session_id]["running"] = False
+        EXECUTION_STATES[session_id]["paused"] = False
+        EXECUTION_STATES[session_id]["current_phase"] = "ready"
+    
+    # Reset message state for UI
+    msg_state = []
+    logger.info(f"Reset notebook display for session {session_id}")
         
     return init_notebook.render(), msg_state
 
@@ -864,45 +935,111 @@ def stop_execution(request: gr.Request):
     session_id = request.session_hash
     logger.info(f"Stopping execution for session {session_id}")
     
-    if session_id in STOP_EVENTS:
-        STOP_EVENTS[session_id].set()
-        logger.info(f"Stop signal sent for session {session_id}")
-        
-        # Update execution state
-        if session_id in EXECUTION_STATES:
+    if session_id in STOP_EVENTS and session_id in EXECUTION_STATES:
+        # Check if execution is actually running
+        if EXECUTION_STATES[session_id].get("running", False):
+            STOP_EVENTS[session_id].set()
+            logger.info(f"Stop signal sent for session {session_id}")
+            
+            # Update execution state
             EXECUTION_STATES[session_id]["running"] = False
             EXECUTION_STATES[session_id]["paused"] = True
-        
-        return "⏸️ Execution stopped - click Run to resume"
+            EXECUTION_STATES[session_id]["current_phase"] = "stopping"
+            
+            # Also update session state if available
+            session_manager = SessionStateManager(session_id, TMP_DIR)
+            session_state = session_manager.load_state()
+            if session_state:
+                session_manager.update_execution_state(
+                    session_state, is_running=False, is_paused=True, current_phase="stopping"
+                )
+                session_manager.save_state(session_state)
+            
+            return "⏸️ Execution stopped - click Run to resume with new input"
+        else:
+            logger.info(f"No active execution to stop for session {session_id}")
+            return "⚪ No active execution to stop"
     else:
-        logger.warning(f"No active execution found for session {session_id}")
-        return "❌ No active execution to stop"
+        logger.warning(f"No execution session found for {session_id}")
+        return "❌ No execution session found"
 
 def shutdown_sandbox(request: gr.Request):
-    """Shutdown the sandbox for this session"""
+    """Shutdown the sandbox and clear ALL session data including LLM interactions"""
     session_id = request.session_hash
-    logger.info(f"Shutting down sandbox for session {session_id}")
+    logger.info(f"Shutting down sandbox and clearing all data for session {session_id}")
     
-    if session_id in SANDBOXES:
-        try:
+    try:
+        # 1. Stop any running execution first
+        if session_id in STOP_EVENTS:
+            STOP_EVENTS[session_id].set()
+            
+        # 2. Shutdown Modal sandbox
+        if session_id in SANDBOXES:
             logger.info(f"Killing Modal sandbox for session {session_id}")
             SANDBOXES[session_id].kill()
             SANDBOXES.pop(session_id)
             logger.info(f"Successfully shutdown sandbox for session {session_id}")
+        
+        # 3. Clear session state files and all data
+        session_manager = SessionStateManager(session_id, TMP_DIR)
+        if session_manager.session_exists():
+            logger.info(f"Clearing session state data for {session_id}")
             
-            # Clean up stop events and execution states
-            if session_id in STOP_EVENTS:
-                STOP_EVENTS.pop(session_id)
-            if session_id in EXECUTION_STATES:
-                EXECUTION_STATES.pop(session_id)
+            # Load session state to show what's being cleared
+            session_state = session_manager.load_state()
+            if session_state:
+                # Log what we're clearing
+                stats = session_state.get("session_stats", {})
+                llm_interactions = len(session_state.get("llm_interactions", []))
+                tool_executions = len(session_state.get("tool_executions", []))
                 
-            return "🔴 Sandbox shutdown successfully", gr.Button(visible=False)
-        except Exception as e:
-            logger.error(f"Error shutting down sandbox for session {session_id}: {str(e)}")
-            return f"❌ Error shutting down sandbox: {str(e)}", gr.Button(visible=True)
-    else:
-        logger.info(f"No active sandbox found for session {session_id}")
-        return "⚪ No active sandbox to shutdown", gr.Button(visible=False)
+                logger.info(f"Clearing session {session_id}: "
+                          f"{stats.get('total_messages', 0)} messages, "
+                          f"{llm_interactions} LLM interactions, "
+                          f"{tool_executions} tool executions, "
+                          f"{stats.get('total_code_executions', 0)} code runs")
+            
+            # Remove session state file
+            if session_manager.state_file.exists():
+                session_manager.state_file.unlink()
+                logger.info(f"Removed session state file for {session_id}")
+            
+            # Remove session directory if it exists and is empty or contains only our files
+            if session_manager.session_dir.exists():
+                try:
+                    # Remove any remaining files in session directory
+                    for file_path in session_manager.session_dir.iterdir():
+                        if file_path.is_file():
+                            file_path.unlink()
+                            logger.debug(f"Removed session file: {file_path}")
+                    
+                    # Try to remove the directory
+                    session_manager.session_dir.rmdir()
+                    logger.info(f"Removed session directory for {session_id}")
+                except OSError as e:
+                    logger.warning(f"Could not remove session directory {session_id}: {e}")
+        
+        # 4. Clear global execution tracking
+        if session_id in STOP_EVENTS:
+            STOP_EVENTS.pop(session_id)
+            logger.debug(f"Cleared stop event for {session_id}")
+            
+        if session_id in EXECUTION_STATES:
+            EXECUTION_STATES.pop(session_id)
+            logger.debug(f"Cleared execution state for {session_id}")
+        
+        # 5. Clear any legacy notebook files
+        legacy_notebook_path = os.path.join(TMP_DIR, session_id, 'jupyter-agent.ipynb')
+        if os.path.exists(legacy_notebook_path):
+            os.remove(legacy_notebook_path)
+            logger.debug(f"Removed legacy notebook file for {session_id}")
+            
+        logger.info(f"Complete shutdown and cleanup finished for session {session_id}")
+        return gr.Button(visible=False)
+        
+    except Exception as e:
+        logger.error(f"Error during shutdown for session {session_id}: {str(e)}")
+        return f"❌ Error during shutdown: {str(e)}", gr.Button(visible=True)
 
 # continue_execution function removed - functionality integrated into execute_jupyter_agent
 
@@ -916,11 +1053,20 @@ def get_execution_status(request: gr.Request):
     state = EXECUTION_STATES[session_id]
     if state["running"]:
         if session_id in STOP_EVENTS and STOP_EVENTS[session_id].is_set():
-            return "⏸️ Stopped"
+            return "⏸️ Stopping..."
         else:
-            return "🟢 Running"
+            # Check if we have more detailed phase information
+            phase = state.get("current_phase", "running")
+            if phase == "generating":
+                return "🟢 Generating response..."
+            elif phase == "executing_code":
+                return "🟢 Executing code..."
+            elif phase == "searching":
+                return "🟢 Searching web..."
+            else:
+                return "🟢 Running"
     elif state.get("paused", False):
-        return "⏸️ Paused"
+        return "⏸️ Paused - Click Run to continue"
     else:
         return "⚪ Ready"
 
@@ -941,6 +1087,36 @@ def update_sandbox_button_visibility(request: gr.Request):
     """Update only the button visibility based on sandbox status"""
     session_id = request.session_hash
     return gr.Button(visible=session_id in SANDBOXES)
+
+def reset_ui_after_shutdown(request: gr.Request):
+    """Reset UI components after complete shutdown"""
+    session_id = request.session_hash
+    
+    # Check if session is truly cleared
+    is_cleared = (session_id not in SANDBOXES and 
+                 session_id not in EXECUTION_STATES and 
+                 session_id not in STOP_EVENTS)
+    
+    if is_cleared:
+        # Return reset state for all UI components
+        return (
+            init_notebook.render(),  # Reset notebook display
+            [],  # Clear message state
+            "⚪ Ready",  # Reset status
+            "⚪ No sandbox active",  # Reset sandbox status
+            gr.Button(visible=False)  # Hide shutdown button
+        )
+    else:
+        # Return current state if not fully cleared
+        status = get_execution_status(request)
+        sandbox_status, button_vis = get_sandbox_status_and_visibility(request)
+        return (
+            init_notebook.render(),  # Still reset notebook display
+            [],  # Still clear message state
+            status,
+            sandbox_status,
+            button_vis
+        )
 
 def reconstruct_message_history_from_notebook(notebook_data):
     """Reconstruct message history from notebook cells"""
@@ -1149,6 +1325,27 @@ css = """
 
 .contain {
     height: 100vh !important;
+}
+
+/* Button states for execution control */
+.button-executing {
+    opacity: 0.6 !important;
+    pointer-events: none !important;
+    cursor: not-allowed !important;
+}
+
+.button-executing::after {
+    content: " ⏳";
+}
+
+.status-running {
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.5; }
+    100% { opacity: 1; }
 }
 """
 
@@ -1384,16 +1581,7 @@ with gr.Blocks() as demo:
         stop_btn = gr.Button("⏸️ Stop", variant="secondary")
         # continue_btn removed - Run button handles continuation automatically
         clear_btn = gr.Button("Clear Notebook", variant="stop")
-    
-    with gr.Row():
         shutdown_btn = gr.Button("🔴 Shutdown Sandbox", variant="stop", visible=False)
-        sandbox_status = gr.Textbox(
-            show_label=False,
-            value="⚪ No sandbox active", 
-            # label="Sandbox Status", 
-            interactive=False,
-            max_lines=1
-        )
     
     # Status display
     status_display = gr.Textbox(
@@ -1428,7 +1616,7 @@ with gr.Blocks() as demo:
 
     shutdown_btn.click(
         fn=shutdown_sandbox,
-        outputs=[sandbox_status, shutdown_btn],
+        outputs=[shutdown_btn],
         show_progress="hidden",
     )
     
@@ -1485,6 +1673,100 @@ with gr.Blocks() as demo:
     if (document.querySelectorAll('.dark').length) {
         document.querySelectorAll('.dark').forEach(el => el.classList.remove('dark'));
     }
+    
+    // Add execution state management functions
+    window.setExecutionState = function(isExecuting) {
+        // Find Run button by text content since variant attribute might not be reliable
+        const buttons = document.querySelectorAll('button');
+        let runButton = null;
+        let stopButton = null;
+        
+        buttons.forEach(button => {
+            const text = button.textContent.trim().toLowerCase();
+            if (text.includes('run') && !text.includes('stop')) {
+                runButton = button;
+            } else if (text.includes('stop') || text.includes('⏸️')) {
+                stopButton = button;
+            }
+        });
+        
+        if (runButton) {
+            if (isExecuting) {
+                runButton.classList.add('button-executing');
+                runButton.disabled = true;
+                runButton.style.opacity = '0.6';
+                runButton.style.cursor = 'not-allowed';
+                runButton.style.pointerEvents = 'none';
+                if (runButton.textContent.indexOf('⏳') === -1) {
+                    runButton.textContent = runButton.textContent.replace('!', '! ⏳');
+                }
+            } else {
+                runButton.classList.remove('button-executing');
+                runButton.disabled = false;
+                runButton.style.opacity = '1';
+                runButton.style.cursor = 'pointer';
+                runButton.style.pointerEvents = 'auto';
+                runButton.textContent = runButton.textContent.replace(' ⏳', '');
+            }
+        }
+        
+        // Also update stop button visibility/state
+        if (stopButton) {
+            stopButton.style.display = isExecuting ? 'block' : 'inline-block';
+        }
+    };
+    
+    // Monitor for status changes and update button states
+    window.monitorExecutionStatus = function() {
+        // Try multiple ways to find the status element
+        let statusElement = document.querySelector('input[label*="Execution Status"], input[label*="Status"], textarea[label*="Status"]');
+        
+        if (!statusElement) {
+            // Fallback: look for any input that might contain status
+            const allInputs = document.querySelectorAll('input, textarea');
+            allInputs.forEach(input => {
+                if (input.value && (input.value.includes('🟢') || input.value.includes('⚪') || input.value.includes('⏸️'))) {
+                    statusElement = input;
+                }
+            });
+        }
+        
+        if (statusElement) {
+            const status = statusElement.value || '';
+            const isRunning = status.includes('🟢') || status.includes('Running') || status.includes('Generating') || status.includes('Executing');
+            const isReady = status.includes('⚪') || status.includes('Ready');
+            
+            window.setExecutionState(isRunning);
+            
+            // Add visual indicator to status element
+            if (isRunning) {
+                statusElement.style.background = '#e3f2fd';
+                statusElement.style.borderColor = '#2196f3';
+            } else if (isReady) {
+                statusElement.style.background = '#f5f5f5';
+                statusElement.style.borderColor = '#ccc';
+            } else {
+                statusElement.style.background = '#fff3e0';
+                statusElement.style.borderColor = '#ff9800';
+            }
+        }
+    };
+    
+    // Set up mutation observer to watch for status changes
+    const observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+            if (mutation.type === 'childList' || mutation.type === 'attributes') {
+                setTimeout(window.monitorExecutionStatus, 100);
+            }
+        });
+    });
+    
+    // Start observing
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true
+    });
 }
 """
     )
