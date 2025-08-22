@@ -14,3 +14,4 @@ pandas
 seaborn
 arize-phoenix-otel
 openinference-instrumentation-openai
+tavily-python
