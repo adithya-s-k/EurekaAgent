@@ -210,8 +210,8 @@ def format_search_results_for_llm(response):
             score = result.get('score', 0)
             
             # Truncate content to reasonable length
-            if len(content) > 300:
-                content = content[:300] + "..."
+            # if len(content) > 300:
+            #     content = content[:300] + "..."
             
             formatted += f"**{i}. {title}** (Relevance: {score:.2f})\n"
             formatted += f"   🔗 {url}\n"
