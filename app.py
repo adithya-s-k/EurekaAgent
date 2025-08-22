@@ -964,79 +964,62 @@ def stop_execution(request: gr.Request):
         return "❌ No execution session found"
 
 def shutdown_sandbox(request: gr.Request):
-    """Shutdown the sandbox and clear session state data while preserving user files"""
+    """Shutdown the sandbox while preserving all session data and files"""
     session_id = request.session_hash
-    logger.info(f"Shutting down sandbox and clearing session data for {session_id} (preserving user files)")
+    logger.info(f"Shutting down sandbox for {session_id} (preserving all session data and files)")
     
     try:
         # 1. Stop any running execution first
         if session_id in STOP_EVENTS:
             STOP_EVENTS[session_id].set()
+            logger.info(f"Stopped execution for session {session_id}")
             
-        # 2. Shutdown Modal sandbox
+        # 2. Shutdown Modal sandbox only
         if session_id in SANDBOXES:
             logger.info(f"Killing Modal sandbox for session {session_id}")
             SANDBOXES[session_id].kill()
             SANDBOXES.pop(session_id)
             logger.info(f"Successfully shutdown sandbox for session {session_id}")
         
-        # 3. Clear session state data but preserve user files
+        # 3. Log what's being preserved (but don't remove anything)
         session_manager = SessionStateManager(session_id, TMP_DIR)
         if session_manager.session_exists():
-            logger.info(f"Clearing session state data for {session_id} (preserving user files)")
+            logger.info(f"Preserving session data for {session_id}")
             
-            # Load session state to show what's being cleared
+            # Load session state to show what's being preserved
             session_state = session_manager.load_state()
             if session_state:
-                # Log what we're clearing
+                # Log what we're preserving
                 stats = session_state.get("session_stats", {})
                 llm_interactions = len(session_state.get("llm_interactions", []))
                 tool_executions = len(session_state.get("tool_executions", []))
                 
-                logger.info(f"Clearing session {session_id}: "
+                logger.info(f"Preserving session {session_id}: "
                           f"{stats.get('total_messages', 0)} messages, "
                           f"{llm_interactions} LLM interactions, "
                           f"{tool_executions} tool executions, "
                           f"{stats.get('total_code_executions', 0)} code runs")
             
-            # Only remove session state file, preserve other files
-            if session_manager.state_file.exists():
-                session_manager.state_file.unlink()
-                logger.info(f"Removed session state file for {session_id}")
-            
-            # DON'T remove the session directory or user files - just log what's being preserved
+            # Log all preserved files
             if session_manager.session_dir.exists():
                 try:
-                    # Count and log preserved files
                     preserved_files = []
                     for file_path in session_manager.session_dir.iterdir():
-                        if file_path.is_file() and file_path.name != 'session_state.json':
+                        if file_path.is_file():
                             preserved_files.append(file_path.name)
                     
                     if preserved_files:
-                        logger.info(f"Preserving {len(preserved_files)} user files in {session_id}: {preserved_files}")
+                        logger.info(f"Preserving {len(preserved_files)} files in {session_id}: {preserved_files}")
                     else:
-                        logger.info(f"No user files to preserve in {session_id}")
+                        logger.info(f"No files found in session {session_id}")
                         
                 except OSError as e:
                     logger.warning(f"Could not check session directory {session_id}: {e}")
         
-        # 4. Clear global execution tracking
-        if session_id in STOP_EVENTS:
-            STOP_EVENTS.pop(session_id)
-            logger.debug(f"Cleared stop event for {session_id}")
+        # 4. Keep execution tracking data (don't clear anything)
+        logger.info(f"Preserving execution state and stop events for {session_id}")
             
-        if session_id in EXECUTION_STATES:
-            EXECUTION_STATES.pop(session_id)
-            logger.debug(f"Cleared execution state for {session_id}")
-        
-        # 5. Clear any legacy notebook files
-        legacy_notebook_path = os.path.join(TMP_DIR, session_id, 'jupyter-agent.ipynb')
-        if os.path.exists(legacy_notebook_path):
-            os.remove(legacy_notebook_path)
-            logger.debug(f"Removed legacy notebook file for {session_id}")
-            
-        logger.info(f"Complete shutdown finished for session {session_id} (user files preserved)")
+        logger.info(f"Sandbox shutdown completed for session {session_id} (all data preserved)")
         return gr.Button(visible=False)
         
     except Exception as e:
