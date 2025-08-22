@@ -142,13 +142,54 @@ header_message = """<div style="text-align: center; padding: 24px 16px; margin-b
   <h1 style="color: #1e3a8a; font-size: 48px; font-weight: 700; margin: 0 0 8px 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
     🔬 Eureka Agent
   </h1>
-  <p style="color: #6b7280; font-size: 11px; margin: 0; display: flex; align-items: center; justify-content: center; gap: 6px;">
-    <img style="height: 16px; width: auto; opacity: 0.7;" 
-         src="https://huggingface.co/spaces/lvwerra/jupyter-agent-2/resolve/main/jupyter-agent-2.png" 
-         alt="Jupyter Agent 2" />
-    <span>Forked from Jupyter Agent 2</span>
-  </p>
+    <p style="color: #6b7280; font-size: 11px; margin: 0; display: flex; align-items: center; justify-content: center; gap: 6px;">
+    <span>
+        Built on top of
+        <a href="https://huggingface.co/spaces/lvwerra/jupyter-agent-2" target="_blank" style="color: #6b7280; text-decoration: underline;">
+        Jupyter Agent 2
+        </a>
+    </span>
+    </p>
 </div>
+"""
+
+shell_command_template = """
+<div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 8px; margin: 16px 0; box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 1px solid #334155;">
+    <!-- Terminal Header -->
+    <div style="background: linear-gradient(90deg, #374151 0%, #4b5563 100%); padding: 8px 12px; border-radius: 8px 8px 0 0; border-bottom: 1px solid #6b7280; display: flex; align-items: center; gap: 6px;">
+        <div style="width: 12px; height: 12px; background: #ef4444; border-radius: 50%;"></div>
+        <div style="width: 12px; height: 12px; background: #f59e0b; border-radius: 50%;"></div>
+        <div style="width: 12px; height: 12px; background: #10b981; border-radius: 50%;"></div>
+        <span style="color: #d1d5db; font-size: 12px; font-weight: 500; margin-left: 12px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">Terminal</span>
+    </div>
+    <!-- Command Area -->
+    <div style="padding: 16px; background-color: #0f172a;">
+        <div style="display: flex; align-items: center; margin-bottom: 4px;">
+            <span style="color: #22d3ee; font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace; font-size: 14px; font-weight: 600; margin-right: 8px;">$</span>
+            <span style="color: #e2e8f0; font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace; font-size: 14px; line-height: 1.4;">{}</span>
+        </div>
+    </div>
+</div>
+"""
+
+shell_output_template = """
+<div style="background: linear-gradient(135deg, #111827 0%, #1f2937 100%) !important; border-radius: 8px; margin: 8px 0 16px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.2); border: 1px solid #374151;">
+    <div style="padding: 16px; background-color: #111827 !important; border-radius: 8px;">
+        <pre style="margin: 0 !important; color: #f1f5f9 !important; background-color: #111827 !important; font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace; font-size: 13px; line-height: 1.5; overflow-x: auto; white-space: pre-wrap; text-shadow: 0 1px 2px rgba(0,0,0,0.1); border: none !important;">{}</pre>
+    </div>
+</div>
+
+<style>
+/* Ensure shell output maintains dark theme */
+.shell-output pre {{
+    background-color: #111827 !important;
+    color: #f1f5f9 !important;
+    border: none !important;
+}}
+.shell-output {{
+    background-color: #111827 !important;
+}}
+</style>
 """
 
 bad_html_bad = """input[type="file"] {
@@ -341,7 +382,7 @@ TIMEOUT_HTML = """
 </style>
 """
 
-# just make the code font a bit smaller
+# Custom CSS for notebook styling including shell commands
 custom_css = """
 <style type="text/css">
 /* Code font size */
@@ -354,6 +395,33 @@ div.input_area pre, div.output_area pre {
 /* Fix prompt truncation */
 .jp-InputPrompt, .jp-OutputPrompt {
     text-overflow: clip !important;
+}
+
+/* Shell command styling - force dark theme */
+.shell-output {
+    background-color: #111827 !important;
+}
+
+.shell-output div {
+    background: linear-gradient(135deg, #111827 0%, #1f2937 100%) !important;
+}
+
+.shell-output pre {
+    background-color: #111827 !important;
+    color: #f1f5f9 !important;
+    border: none !important;
+    margin: 0 !important;
+}
+
+/* Override any notebook styles that might interfere */
+div[data-jp-cell-type="markdown"] .shell-output pre {
+    background-color: #111827 !important;
+    color: #f1f5f9 !important;
+}
+
+/* Additional terminal styling */
+.terminal-header {
+    background: linear-gradient(90deg, #374151 0%, #4b5563 100%) !important;
 }
 </style>
 """
@@ -678,6 +746,100 @@ class JupyterNotebook:
             "metadata": {},
             "source": markdown_formatted
         })
+
+    def add_shell_command(self, command):
+        """Add a shell command cell with terminal-style formatting"""
+        logger.debug(f"Adding shell command cell: '{command}'")
+        
+        # Format command with terminal-style template
+        shell_formatted = shell_command_template.format(self._clean_shell_command(command))
+        
+        self.data["cells"].append({
+            "cell_type": "markdown",
+            "metadata": {"shell_command": True, "command": command},
+            "source": shell_formatted
+        })
+
+    def append_shell_execution(self, execution):
+        """Append shell execution results to the notebook with terminal styling"""
+        logger.debug("Appending shell execution results")
+        
+        # Format the shell output using terminal styling
+        output_content = self._format_shell_output(execution)
+        shell_output_formatted = shell_output_template.format(output_content)
+        
+        # Wrap in a div with shell-output class for styling
+        shell_output_with_class = f'<div class="shell-output">{shell_output_formatted}</div>'
+        
+        # Add the output as a new markdown cell
+        self.data["cells"].append({
+            "cell_type": "markdown",
+            "metadata": {"shell_output": True},
+            "source": shell_output_with_class
+        })
+        logger.debug("Added shell output cell to notebook")
+
+    def _clean_shell_command(self, command):
+        """Clean and escape shell command for display"""
+        if not command:
+            return ""
+        
+        # Basic HTML escaping for shell commands
+        command = command.replace('&', '&amp;')
+        command = command.replace('<', '&lt;')
+        command = command.replace('>', '&gt;')
+        command = command.replace('"', '&quot;')
+        command = command.replace("'", '&#39;')
+        
+        return command
+
+    def _format_shell_output(self, execution):
+        """Format shell execution output for terminal-style display"""
+        output_parts = []
+        
+        # Add stdout if present
+        if execution.logs.stdout:
+            stdout_text = ''.join(execution.logs.stdout).strip()
+            if stdout_text:
+                output_parts.append(stdout_text)
+        
+        # Add stderr if present (but filter out plot data)
+        if execution.logs.stderr:
+            stderr_text = ''.join(execution.logs.stderr).strip()
+            
+            # Filter out plot data from stderr
+            plot_start = stderr_text.find("__PLOT_DATA__")
+            plot_end = stderr_text.find("__END_PLOT_DATA__")
+            if plot_start != -1 and plot_end != -1:
+                clean_stderr = stderr_text[:plot_start] + stderr_text[plot_end + len("__END_PLOT_DATA__"):]
+                stderr_text = clean_stderr.strip()
+            
+            if stderr_text:
+                output_parts.append(f"STDERR:\n{stderr_text}")
+        
+        # Add error information if present
+        if execution.error:
+            error_text = f"ERROR: {execution.error.name}: {execution.error.value}"
+            if execution.error.traceback:
+                error_text += f"\n{execution.error.traceback}"
+            output_parts.append(error_text)
+        
+        # Add execution results if present (for shell commands that produce results)
+        if execution.results:
+            for result in execution.results:
+                if result.text:
+                    output_parts.append(result.text.strip())
+        
+        # Join all output parts
+        final_output = '\n\n'.join(output_parts) if output_parts else "No output"
+        
+        # Basic HTML escaping for output
+        final_output = final_output.replace('&', '&amp;')
+        final_output = final_output.replace('<', '&lt;')
+        final_output = final_output.replace('>', '&gt;')
+        
+        logger.debug(f"Formatted shell output: {len(final_output)} chars")
+        return final_output
 
     def add_error(self, error_message):
         """Add an error message cell to the notebook"""

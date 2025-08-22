@@ -64,18 +64,27 @@ The application will launch a Gradio interface accessible via your web browser.
 
 ### Environment Variables
 
-| Variable                | Description                   | Required |
-| ----------------------- | ----------------------------- | -------- |
-| `OPENAI_API_KEY`        | OpenAI API key                | Yes\*    |
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint         | No       |
-| `AZURE_OPENAI_API_KEY`  | Azure OpenAI API key          | No       |
-| `PROVIDER_API_ENDPOINT` | Custom provider endpoint      | No       |
-| `PROVIDER_API_KEY`      | Custom provider API key       | No       |
-| `MODEL_NAME`            | Model to use (default: gpt-4) | No       |
-| `MODAL_TOKEN_ID`        | Modal token ID                | Yes      |
-| `MODAL_TOKEN_SECRET`    | Modal token secret            | Yes      |
+| Variable                     | Description                   | Required | Format/Example                  |
+| ---------------------------- | ----------------------------- | -------- | ------------------------------- |
+| `MODAL_TOKEN_ID`             | Modal token ID                | Yes      | `ak-...`                        |
+| `MODAL_TOKEN_SECRET`         | Modal token secret            | Yes      | `as-...`                        |
+| `PROVIDER_API_KEY`           | AI Provider API key           | Yes\*    | `sk-...`, `gsk_...`, `csk-...`  |
+| `PROVIDER_API_ENDPOINT`      | AI Provider API endpoint      | Yes\*    | `https://api.anthropic.com/v1/` |
+| `MODEL_NAME`                 | Model to use                  | Yes\*    | `claude-sonnet-4-20250514`      |
+| `HF_TOKEN`                   | Hugging Face token (optional) | No       | `hf_...`                        |
+| `TAVILY_API_KEY`             | Tavily API key for web search | No       | `tvly-...`                      |
+| `PHOENIX_API_KEY`            | Phoenix tracing API key       | No       | -                               |
+| `PHOENIX_COLLECTOR_ENDPOINT` | Phoenix collector endpoint    | No       | -                               |
+| `ENVIRONMENT`                | Environment mode              | No       | `dev`/`prod`                    |
 
-\*At least one API provider must be configured
+\*At least one complete AI provider configuration must be provided
+
+**Legacy OpenAI Support:**
+| Variable | Description | Required |
+| ----------------------- | ----------------------------- | -------- |
+| `OPENAI_API_KEY` | OpenAI API key | No |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint | No |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI API key | No |
 
 ### Hardware Options
 
@@ -107,23 +116,30 @@ The application will launch a Gradio interface accessible via your web browser.
 
 ## 🏗️ Architecture
 
-- **Frontend**: Gradio web interface
-- **Backend**: Python application with OpenAI integration
-- **Execution Environment**: Modal containerized sandboxes
-- **Code Execution**: Jupyter-like stateful environment
-- **Storage**: Temporary file storage for notebooks and outputs
+- **Frontend**: Gradio web interface with real-time status updates
+- **Backend**: Python application with multi-provider AI integration
+- **Execution Environment**: Modal containerized sandboxes with GPU support
+- **Code Execution**: Persistent Jupyter-like stateful environment
+- **Session Management**: Comprehensive session state tracking with Phoenix tracing
+- **Storage**: File-based session persistence with notebook compatibility
+- **Web Search**: Integrated Tavily search for current information
+- **Hardware Support**: CPU, T4, L4, A100, H100 configurations
 
 ## 📁 Project Structure
 
 ```
-jupyter-agent-2/
-├── app.py              # Main Gradio application
-├── jupyter_handler.py  # Jupyter notebook management
-├── utils.py           # Utility functions and execution logic
-├── modal_sandbox.py   # Modal sandbox configuration
-├── ds-system-prompt-v1.txt  # System prompt for the AI agent
+EurekaAgent/
+├── app.py              # Main Gradio application with API key management
+├── jupyter_handler.py  # Jupyter notebook management and rendering
+├── jupyter_agent.py           # Utility functions, execution logic, and session management
+├── modal_sandbox.py   # Modal sandbox configuration with GPU support
+├── system_prompt.txt  # System prompt for the AI agent
 ├── requirements.txt   # Python dependencies
-└── tmp/              # Temporary files and notebooks
+└── temp/              # Temporary files, notebooks, and session states
+    ├── <session_id>/
+    │   ├── session_state.json    # Complete session state and history
+    │   └── jupyter-agent.ipynb   # Legacy notebook file for UI compatibility
+    └── jupyter-agent.ipynb       # Default notebook template
 ```
 
 ## 🤝 Contributing

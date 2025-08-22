@@ -18,7 +18,7 @@ if not get_space():
         load_dotenv()
     except (ImportError, ModuleNotFoundError):
         pass
-from utils import (
+from jupyter_agent import (
     run_interactive_notebook_with_session_state,
     SessionStateManager,
 )
@@ -813,7 +813,7 @@ You can either:
     logger.debug(f"Session {session_id} ready with {len(message_history)} messages")
 
     # Determine which tools to use based on web search toggle
-    from utils import TOOLS
+    from EurekaAgent.jupyter_agent import TOOLS
     if enable_web_search:
         # Check if Tavily API key is available
         tavily_key = os.environ.get("TAVILY_API_KEY") or tavily_api_key
@@ -831,7 +831,7 @@ You can either:
     
     # Import Phoenix session context if available
     try:
-        from utils import create_phoenix_session_context
+        from EurekaAgent.jupyter_agent import create_phoenix_session_context
         phoenix_available = True
     except ImportError:
         phoenix_available = False
@@ -964,9 +964,9 @@ def stop_execution(request: gr.Request):
         return "❌ No execution session found"
 
 def shutdown_sandbox(request: gr.Request):
-    """Shutdown the sandbox and clear ALL session data including LLM interactions"""
+    """Shutdown the sandbox and clear session state data while preserving user files"""
     session_id = request.session_hash
-    logger.info(f"Shutting down sandbox and clearing all data for session {session_id}")
+    logger.info(f"Shutting down sandbox and clearing session data for {session_id} (preserving user files)")
     
     try:
         # 1. Stop any running execution first
@@ -980,10 +980,10 @@ def shutdown_sandbox(request: gr.Request):
             SANDBOXES.pop(session_id)
             logger.info(f"Successfully shutdown sandbox for session {session_id}")
         
-        # 3. Clear session state files and all data
+        # 3. Clear session state data but preserve user files
         session_manager = SessionStateManager(session_id, TMP_DIR)
         if session_manager.session_exists():
-            logger.info(f"Clearing session state data for {session_id}")
+            logger.info(f"Clearing session state data for {session_id} (preserving user files)")
             
             # Load session state to show what's being cleared
             session_state = session_manager.load_state()
@@ -999,25 +999,27 @@ def shutdown_sandbox(request: gr.Request):
                           f"{tool_executions} tool executions, "
                           f"{stats.get('total_code_executions', 0)} code runs")
             
-            # Remove session state file
+            # Only remove session state file, preserve other files
             if session_manager.state_file.exists():
                 session_manager.state_file.unlink()
                 logger.info(f"Removed session state file for {session_id}")
             
-            # Remove session directory if it exists and is empty or contains only our files
+            # DON'T remove the session directory or user files - just log what's being preserved
             if session_manager.session_dir.exists():
                 try:
-                    # Remove any remaining files in session directory
+                    # Count and log preserved files
+                    preserved_files = []
                     for file_path in session_manager.session_dir.iterdir():
-                        if file_path.is_file():
-                            file_path.unlink()
-                            logger.debug(f"Removed session file: {file_path}")
+                        if file_path.is_file() and file_path.name != 'session_state.json':
+                            preserved_files.append(file_path.name)
                     
-                    # Try to remove the directory
-                    session_manager.session_dir.rmdir()
-                    logger.info(f"Removed session directory for {session_id}")
+                    if preserved_files:
+                        logger.info(f"Preserving {len(preserved_files)} user files in {session_id}: {preserved_files}")
+                    else:
+                        logger.info(f"No user files to preserve in {session_id}")
+                        
                 except OSError as e:
-                    logger.warning(f"Could not remove session directory {session_id}: {e}")
+                    logger.warning(f"Could not check session directory {session_id}: {e}")
         
         # 4. Clear global execution tracking
         if session_id in STOP_EVENTS:
@@ -1034,7 +1036,7 @@ def shutdown_sandbox(request: gr.Request):
             os.remove(legacy_notebook_path)
             logger.debug(f"Removed legacy notebook file for {session_id}")
             
-        logger.info(f"Complete shutdown and cleanup finished for session {session_id}")
+        logger.info(f"Complete shutdown finished for session {session_id} (user files preserved)")
         return gr.Button(visible=False)
         
     except Exception as e:

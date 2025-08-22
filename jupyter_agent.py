@@ -45,6 +45,40 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "edit_and_execute_current_cell",
+            "description": "Edit the current/last code cell and execute the new code. Use this to fix errors or modify the previous code instead of creating a new cell.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "The updated Python code to replace the current cell with and execute."
+                    }
+                },
+                "required": ["code"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_shell_command",
+            "description": "Execute shell/system commands like ls, cat, mkdir, etc. This runs independently of Python and provides terminal-style output.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute (e.g., 'ls -la', 'cat file.txt', 'mkdir new_folder')."
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "tavily_search",
             "description": "Search the web for current information, documentation, tutorials, and solutions to coding problems. Use this to get context before starting tasks or when encountering errors.",
             "parameters": {
@@ -1062,6 +1096,263 @@ An error occurred while executing the code in the sandbox:
                         tool_call_id=tool_call.id,
                         metadata={"turn": turns, "search_successful": False, "error": str(e)}
                     )
+            elif tool_call.function.name == "edit_and_execute_current_cell":
+                # Update phase to executing code
+                session_state_manager.update_execution_state(session_state, current_phase="executing_code")
+                
+                logger.debug(f"Processing edit current cell tool call: {tool_call.id}")
+                tool_args = json.loads(tool_call.function.arguments)
+                code = tool_args["code"]
+                logger.debug(f"Code to execute in current cell: {len(code)} characters")
+                
+                # Check if we have a code cell to edit
+                if notebook.get_last_cell_type() == "code":
+                    logger.info("Editing last code cell with new code")
+                    notebook.update_last_code_cell(code)
+                else:
+                    logger.info("No code cell to edit, creating new cell")
+                    notebook.add_code(code)
+                
+                logger.debug("Yielding notebook in 'executing' mode")
+                yield notebook.render(mode="executing"), notebook.data, messages
+
+                try:
+                    # Check for stop event before execution
+                    if stop_event and stop_event.is_set():
+                        logger.info("Stop event detected before code execution")
+                        stopped_message = """**Execution Stopped** ⏸️
+
+The execution was stopped by user request before the code could run."""
+                        notebook.add_markdown(stopped_message, "assistant")
+                        yield notebook.render(mode="stopped"), notebook.data, messages
+                        return
+                    
+                    # Execution sandbox call - might timeout
+                    logger.info("Executing edited code in sandbox")
+                    execution = sbx.run_code(code)
+                    notebook.append_execution(execution)
+                    
+                    # Update error and warning tracking for next iteration
+                    previous_execution_had_error = notebook.has_execution_error(execution)
+                    previous_execution_had_warnings = notebook.has_execution_warnings(execution)
+                    # Log tool execution in session state
+                    tool_response_content = parse_exec_result_llm(execution, max_code_output=max_code_output)
+                    session_state_manager.log_tool_execution(
+                        session_state, tool_call.id, "edit_and_execute_current_cell",
+                        tool_args, tool_response_content, execution
+                    )
+                    
+                    if previous_execution_had_error:
+                        logger.warning("Edited code execution resulted in error")
+                    elif previous_execution_had_warnings:
+                        logger.info("Edited code execution completed with warnings")
+                    else:
+                        logger.info("Edited code execution completed successfully")
+                    
+                except Exception as e:
+                    # Handle sandbox timeout/execution errors
+                    logger.error(f"Edited code execution failed: {str(e)}")
+                    
+                    # Add detailed error information for code execution failures
+                    error_message = str(e)
+                    if "timeout" in error_message.lower():
+                        detailed_error = f"""**Code Execution Timeout** ⏰
+
+The edited code execution took too long and was terminated:
+- Code may have entered an infinite loop
+- Processing large datasets can cause timeouts
+- Complex computations may exceed time limits
+
+**What you can try:**
+- Optimize your code for better performance
+- Break down complex operations into smaller steps
+- Increase the timeout limit in settings
+- Check for infinite loops or blocking operations
+
+**Technical details:**
+```
+{error_message}
+```"""
+                    else:
+                        detailed_error = f"""**Code Execution Failed** 💥
+
+An error occurred while executing the edited code in the sandbox:
+
+**Technical details:**
+```
+{error_message}
+```
+
+**What you can try:**
+- Check the code for syntax errors
+- Verify all required packages are available
+- Try simplifying the code
+- Check the sandbox logs for more details"""
+                    
+                    notebook.add_error(detailed_error)
+                    yield notebook.render(mode="error"), notebook.data, messages
+                    return
+
+                # Prepare tool response
+                raw_execution = notebook.parse_exec_result_nb(execution)
+                
+                logger.debug(f"Tool response: {len(tool_response_content)} chars content, {len(raw_execution)} raw outputs")
+
+                # Add tool response to session state only
+                session_state_manager.add_message(
+                    session_state, "tool", tool_response_content,
+                    tool_call_id=tool_call.id, raw_execution=raw_execution,
+                    metadata={"turn": turns, "execution_successful": not previous_execution_had_error, "action": "edit_cell"}
+                )
+            elif tool_call.function.name == "execute_shell_command":
+                # Update phase to executing shell command
+                session_state_manager.update_execution_state(session_state, current_phase="executing_shell")
+                
+                logger.debug(f"Processing shell command tool call: {tool_call.id}")
+                tool_args = json.loads(tool_call.function.arguments)
+                command = tool_args["command"]
+                logger.debug(f"Shell command to execute: '{command}'")
+                
+                # Add shell command to notebook with special styling
+                notebook.add_shell_command(command)
+                
+                logger.debug("Yielding notebook in 'executing' mode")
+                yield notebook.render(mode="executing"), notebook.data, messages
+
+                try:
+                    # Check for stop event before execution
+                    if stop_event and stop_event.is_set():
+                        logger.info("Stop event detected before shell execution")
+                        stopped_message = """**Execution Stopped** ⏸️
+
+The execution was stopped by user request before the shell command could run."""
+                        notebook.add_markdown(stopped_message, "assistant")
+                        yield notebook.render(mode="stopped"), notebook.data, messages
+                        return
+                    
+                    # Execute shell command in sandbox using raw shell execution
+                    logger.info(f"Executing raw shell command in sandbox: {command}")
+                    
+                    try:
+                        # Use the new raw shell execution method
+                        if hasattr(sbx, 'run_shell'):
+                            shell_execution = sbx.run_shell(command, timeout=30)
+                            logger.info("Shell command executed using raw shell method")
+                        else:
+                            # Fallback: Execute shell command using Python subprocess within sandbox
+                            shell_code = f"""
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(
+        {repr(command)}, 
+        shell=True, 
+        capture_output=True, 
+        text=True, 
+        timeout=30
+    )
+    
+    if result.stdout:
+        print("STDOUT:")
+        print(result.stdout)
+    
+    if result.stderr:
+        print("STDERR:")
+        print(result.stderr)
+    
+    print(f"Exit code: {{result.returncode}}")
+    
+except subprocess.TimeoutExpired:
+    print("Error: Command timed out after 30 seconds")
+except Exception as e:
+    print(f"Error executing command: {{e}}")
+"""
+                            shell_execution = sbx.run_code(shell_code)
+                            logger.info("Shell command executed via Python subprocess fallback")
+                        
+                        # Add shell execution results to notebook
+                        notebook.append_shell_execution(shell_execution)
+                        
+                        # Prepare response content for LLM
+                        shell_response_content = parse_exec_result_llm(shell_execution, max_code_output=max_code_output)
+                        
+                        # Log tool execution in session state
+                        session_state_manager.log_tool_execution(
+                            session_state, tool_call.id, "execute_shell_command",
+                            tool_args, shell_response_content, shell_execution
+                        )
+                        
+                        # Check for errors
+                        shell_had_error = notebook.has_execution_error(shell_execution)
+                        
+                        if shell_had_error:
+                            logger.warning("Shell command execution resulted in error")
+                        else:
+                            logger.info("Shell command execution completed successfully")
+                        
+                    except Exception as shell_error:
+                        logger.error(f"Shell command execution failed: {str(shell_error)}")
+                        
+                        # Create error message
+                        detailed_error = f"""**Shell Command Failed** 🔧
+
+An error occurred while executing the shell command:
+
+**Command:** `{command}`
+
+**Technical details:**
+```
+{str(shell_error)}
+```
+
+**What you can try:**
+- Check if the command exists in the sandbox environment
+- Verify command syntax
+- Try a simpler version of the command
+- Check if required tools/packages are installed"""
+                        
+                        notebook.add_error(detailed_error)
+                        
+                        # Log failed execution
+                        session_state_manager.log_tool_execution(
+                            session_state, tool_call.id, "execute_shell_command",
+                            tool_args, detailed_error
+                        )
+                        
+                        yield notebook.render(mode="error"), notebook.data, messages
+                        return
+                    
+                except Exception as e:
+                    # Handle general execution errors
+                    logger.error(f"Shell command execution failed: {str(e)}")
+                    
+                    detailed_error = f"""**Shell Execution Error** ⚠️
+
+An unexpected error occurred while executing the shell command:
+
+**Command:** `{command}`
+
+**Technical details:**
+```
+{str(e)}
+```"""
+                    
+                    notebook.add_error(detailed_error)
+                    yield notebook.render(mode="error"), notebook.data, messages
+                    return
+
+                # Prepare tool response for LLM and session state
+                raw_execution = notebook.parse_exec_result_nb(shell_execution)
+                
+                logger.debug(f"Shell tool response: {len(shell_response_content)} chars content")
+
+                # Add tool response to session state
+                session_state_manager.add_message(
+                    session_state, "tool", shell_response_content,
+                    tool_call_id=tool_call.id, raw_execution=raw_execution,
+                    metadata={"turn": turns, "command": command, "execution_successful": not shell_had_error, "action": "shell_command"}
+                )
             else:
                 logger.warning(f"Unknown tool call function: {tool_call.function.name}")
 

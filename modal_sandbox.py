@@ -645,11 +645,87 @@ while True:
             }
             return ModalExecution(error=error_data)
     
+    def run_shell(self, command: str, timeout: int = 30) -> ModalExecution:
+        """
+        Execute raw shell commands directly in the sandbox without Python wrapper
+        
+        Args:
+            command: Shell command to execute
+            timeout: Timeout in seconds (default 30)
+            
+        Returns:
+            ModalExecution object with shell output
+        """
+        try:
+            if not self._sandbox:
+                raise RuntimeError("Sandbox not initialized")
+                
+            logger.debug(f"Executing raw shell command: {command}")
+            
+            # Use Modal's exec to run shell command directly
+            # Split command into parts for exec (simple approach for common commands)
+            if ' ' in command:
+                # For complex commands, use sh -c
+                result = self._sandbox.exec("sh", "-c", command, timeout=timeout)
+            else:
+                # For simple commands, run directly
+                result = self._sandbox.exec(command, timeout=timeout)
+            
+            # Wait for completion
+            result.wait()
+            
+            # Get output
+            stdout_output = ""
+            stderr_output = ""
+            
+            try:
+                stdout_output = result.stdout.read() if result.stdout else ""
+            except Exception:
+                pass
+                
+            try:
+                stderr_output = result.stderr.read() if result.stderr else ""
+            except Exception:
+                pass
+            
+            # Check for errors based on return code
+            error_data = None
+            if result.returncode != 0:
+                error_data = {
+                    "name": "ShellCommandError",
+                    "value": f"Command '{command}' exited with code {result.returncode}",
+                    "traceback": f"Command: {command}\nExit Code: {result.returncode}\nSTDERR: {stderr_output}"
+                }
+            
+            logger.debug(f"Shell command completed with exit code: {result.returncode}")
+            
+            return ModalExecution(
+                stdout=stdout_output,
+                stderr=stderr_output,
+                error=error_data,
+                results=[]
+            )
+            
+        except Exception as e:
+            logger.error(f"Error executing shell command '{command}': {str(e)}")
+            
+            # Return error execution
+            error_data = {
+                "name": type(e).__name__,
+                "value": str(e),
+                "traceback": f"Shell command failed: {command}\nError: {str(e)}"
+            }
+            
+            return ModalExecution(
+                stdout="",
+                stderr="",
+                error=error_data,
+                results=[]
+            )
+
     def get_info(self) -> ModalSandboxInfo:
         """Get sandbox info for countdown timer"""
         return self._sandbox_info
-    
-
     
     def kill(self):
         """Terminate the sandbox and persistent session"""
