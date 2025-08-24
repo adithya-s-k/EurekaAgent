@@ -527,8 +527,8 @@ class JupyterNotebook:
                             tool_message = messages[i + 1]
                             if tool_message["role"] == "tool" and tool_message.get("tool_call_id") == tool_call["id"]:
                                 logger.debug(f"Found matching tool response for {tool_call['id']}")
-                                # Use the raw execution directly!
-                                execution = tool_message["raw_execution"]
+                                # Use the raw execution if available, otherwise fall back to empty list
+                                execution = tool_message.get("raw_execution", [])
                                 self.add_code_execution(code, execution, parsed=True)
                                 logger.debug(f"Added code execution cell with {len(execution)} outputs")
                                 i += 1  # Skip the tool message since we just processed it

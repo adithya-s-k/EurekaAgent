@@ -79,7 +79,7 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "tavily_search",
+            "name": "web_search",
             "description": "Search the web for current information, documentation, tutorials, and solutions to coding problems. Use this to get context before starting tasks or when encountering errors.",
             "parameters": {
                 "type": "object",
@@ -374,7 +374,7 @@ class SessionStateManager:
         # Update stats
         if tool_name == "add_and_execute_jupyter_code_cell":
             state["session_stats"]["total_code_executions"] = state["session_stats"].get("total_code_executions", 0) + 1
-        elif tool_name == "tavily_search":
+        elif tool_name == "web_search":
             state["session_stats"]["total_searches"] = state["session_stats"].get("total_searches", 0) + 1
             
         if not tool_execution["success"]:
@@ -617,7 +617,7 @@ def clean_messages_for_api(messages):
     return cleaned_messages
 
 
-def tavily_search(query):
+def web_search(query):
     """
     Perform web search using Tavily API with automatic year addition and formatting.
     
@@ -1041,7 +1041,7 @@ An error occurred while executing the code in the sandbox:
                     tool_call_id=tool_call.id, raw_execution=raw_execution,
                     metadata={"turn": turns, "execution_successful": not previous_execution_had_error}
                 )
-            elif tool_call.function.name == "tavily_search":
+            elif tool_call.function.name == "web_search":
                 # Update phase to searching
                 session_state_manager.update_execution_state(session_state, current_phase="searching")
                 
@@ -1056,13 +1056,13 @@ An error occurred while executing the code in the sandbox:
                 
                 try:
                     # Perform search
-                    search_results = tavily_search(query)
+                    search_results = web_search(query)
                     logger.info("Search completed successfully")
                     
                     # Log search tool execution
                     tool_args = json.loads(tool_call.function.arguments)
                     session_state_manager.log_tool_execution(
-                        session_state, tool_call.id, "tavily_search",
+                        session_state, tool_call.id, "web_search",
                         tool_args, search_results
                     )
                     
@@ -1083,7 +1083,7 @@ An error occurred while executing the code in the sandbox:
                     # Log failed search
                     tool_args = json.loads(tool_call.function.arguments)
                     session_state_manager.log_tool_execution(
-                        session_state, tool_call.id, "tavily_search",
+                        session_state, tool_call.id, "web_search",
                         tool_args, error_message
                     )
                     
@@ -1236,7 +1236,7 @@ The execution was stopped by user request before the shell command could run."""
                     try:
                         # Use the new raw shell execution method
                         if hasattr(sbx, 'run_shell'):
-                            shell_execution = sbx.run_shell(command, timeout=30)
+                            shell_execution = sbx.run_shell(command, timeout=60)
                             logger.info("Shell command executed using raw shell method")
                         else:
                             # Fallback: Execute shell command using Python subprocess within sandbox
@@ -1250,7 +1250,7 @@ try:
         shell=True, 
         capture_output=True, 
         text=True, 
-        timeout=30
+        timeout=60
     )
     
     if result.stdout:
@@ -1264,7 +1264,7 @@ try:
     print(f"Exit code: {{result.returncode}}")
     
 except subprocess.TimeoutExpired:
-    print("Error: Command timed out after 30 seconds")
+    print("Error: Command timed out after 60 seconds")
 except Exception as e:
     print(f"Error executing command: {{e}}")
 """

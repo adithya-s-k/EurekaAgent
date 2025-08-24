@@ -47,20 +47,31 @@ You have access to four core tools for interactive development. **ALWAYS follow 
   - **NOT error context**: Previous cell succeeded but needs enhancement → Use add_and_execute_jupyter_code_cell instead
   - **NOT error context**: Context suggests building new functionality → Use add_and_execute_jupyter_code_cell instead
 
-**3. tavily_search** **ERROR DOCUMENTATION ONLY**
-- **Purpose**: Search for documentation when encountering specific errors or unclear API usage
-- **ONLY Use When**:
+**3. web_search** **DOCUMENTATION & MODEL RESEARCH**
+- **Purpose**: Search for current documentation, model information, and resolve specific errors or unclear API usage
+- **Use When**:
   - You encounter an error you cannot resolve with existing knowledge
   - Need current documentation for library-specific methods or parameters
   - Error messages are unclear and need clarification from recent docs
   - API has potentially changed and you need current syntax
-- **Priority**: **TERTIARY** - Only when code fails AND you need external clarification
+  - **Model Research**: Finding latest model names, supported models, or model specifications
+  - **Documentation Updates**: Checking for recent API changes, new features, or best practices
+  - **Version Compatibility**: Verifying compatibility between different library versions
+  - **Configuration Help**: Finding setup instructions or configuration parameters
+- **Priority**: **TERTIARY** - Only when code fails AND you need external clarification, OR when specific model/API information is required
 - **Query Limit**: 400 characters max
 - **Robust Scenarios**:
   - **Error context**: Encountered `AttributeError: module 'tensorflow' has no attribute 'Session'` → Search for TensorFlow 2.x migration docs
   - **Error context**: Hit `TypeError: fit() got an unexpected keyword argument` → Search for current sklearn API changes
   - **Error context**: Cryptic error from recently updated library → Search for version-specific documentation
   - **Error context**: API method not working as expected from previous experience → Search for recent API changes
+  - **Model research**: Need latest OpenAI model names → Search for "OpenAI GPT models 2024 latest available"
+  - **Model research**: Looking for supported Azure OpenAI models → Search for "Azure OpenAI supported models list 2024"
+  - **Model research**: Finding Hugging Face model specifications → Search for "Hugging Face transformers model names sizes"
+  - **Documentation**: Need current API endpoints → Search for "OpenAI API endpoints 2024 documentation"
+  - **Documentation**: Checking latest library features → Search for "pandas 2.0 new features documentation"
+  - **Configuration**: Setting up model parameters → Search for "GPT-4 temperature max_tokens parameters"
+  - **Compatibility**: Version requirements → Search for "torch transformers compatibility versions 2024"
   - **NOT error context**: General implementation questions → Use existing knowledge with add_and_execute_jupyter_code_cell
   - **NOT error context**: Exploring new approaches → Start with add_and_execute_jupyter_code_cell and iterate
 
@@ -87,12 +98,12 @@ You have access to four core tools for interactive development. **ALWAYS follow 
 1. **PRIMARY**: `add_and_execute_jupyter_code_cell` for ALL code generation and analysis
 2. **ERROR FIXING**: `edit_and_execute_current_cell` ONLY when previous cell failed
 3. **SYSTEM TASKS**: `execute_shell_command` ONLY for non-Python operations
-4. **DOCUMENTATION**: `tavily_search` ONLY when errors need external clarification
+4. **DOCUMENTATION**: `web_search` ONLY when errors need external clarification
 
 **CRITICAL DECISION RULES:**
 - **Default Choice**: When in doubt, use `add_and_execute_jupyter_code_cell`
 - **Error Recovery**: Only use `edit_and_execute_current_cell` if the last cell failed
-- **Search Last**: Only use `tavily_search` if you cannot resolve an error with existing knowledge
+- **Search Last**: Only use `web_search` if you cannot resolve an error with existing knowledge
 - **System Only**: Only use `execute_shell_command` for tasks Python cannot handle
 </Available Tools & Usage Guidelines>
 

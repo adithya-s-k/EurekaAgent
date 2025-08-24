@@ -409,7 +409,7 @@ while True:
                                 shell=True,
                                 capture_output=True,
                                 text=True,
-                                timeout=30  # 30 second timeout for shell commands
+                                timeout=60  # 60 second timeout for shell commands
                             )
                             
                             if result.stdout:
@@ -426,7 +426,7 @@ while True:
                                 
                         except subprocess.TimeoutExpired:
                             stderr_parts.append(f"$ {shell_cmd}")
-                            stderr_parts.append("Command timed out after 30 seconds")
+                            stderr_parts.append("Command timed out after 60 seconds")
                         except Exception as e:
                             stderr_parts.append(f"$ {shell_cmd}")
                             stderr_parts.append(f"Error executing shell command: {str(e)}")
@@ -567,7 +567,7 @@ while True:
             time.sleep(0.01)
             
             # Wait for result file to appear
-            max_wait = 30  # Wait up to 30 seconds for code execution
+            max_wait = 60  # Wait up to 60 seconds for code execution
             result = None
             
             for _ in range(max_wait * 10):  # Check every 0.1 seconds
@@ -645,13 +645,13 @@ while True:
             }
             return ModalExecution(error=error_data)
     
-    def run_shell(self, command: str, timeout: int = 30) -> ModalExecution:
+    def run_shell(self, command: str, timeout: int =60) -> ModalExecution:
         """
         Execute raw shell commands directly in the sandbox without Python wrapper
         
         Args:
             command: Shell command to execute
-            timeout: Timeout in seconds (default 30)
+            timeout: Timeout in seconds (default 60)
             
         Returns:
             ModalExecution object with shell output
